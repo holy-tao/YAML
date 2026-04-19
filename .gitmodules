@@ -2,3 +2,11 @@
 	path = tests/YUnit
 	url = git@github.com:holy-tao/Yunit.git
 	branch = v2
+[submodule "src/Lib/MCL"]
+	path = src/Lib/MCL
+	url = git@github.com:G33kDude/MCL.ahk.git
+	branch = v2
+[submodule "src/native/libyaml"]
+	path = src/native/libyaml
+	url = git@github.com:yaml/libyaml.git
+	branch = master
