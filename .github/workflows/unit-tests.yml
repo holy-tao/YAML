@@ -1,14 +1,18 @@
 name: Unit Tests
 
-on: 
+on:
   workflow_dispatch:
   workflow_call:
   push:
 
 jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+
   test:
     name: Unit Tests (${{ matrix.exe }} - ${{ matrix.version }})
     runs-on: windows-latest
+    needs: build
     permissions:
       contents: read
       checks: write
@@ -30,10 +34,16 @@ jobs:
         with:
           version: ${{ matrix.version }}
 
+      - name: Download dist/YAML.ahk
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-yaml
+          path: dist
+
       - name: Run Unit Tests
         working-directory: tests
         shell: powershell
-        run: ${{ matrix.exe }} /ErrorStdOut RunTests.ahk
+        run: ${{ matrix.exe }} /ErrorStdOut=UTF-8 RunTests.ahk
 
       - name: Publish Test Results
         if: always()
@@ -42,6 +52,53 @@ jobs:
           report_paths: tests/junit.xml
           token: ${{ secrets.GITHUB_TOKEN }}
           check_name: Test Results (${{ matrix.exe }} - ${{ matrix.version }})
+          fail_on_failure: true
+          require_tests: true
+
+  conformance:
+    name: "Conformance Tests"
+    runs-on: windows-latest
+    needs: build
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install AutoHotkey V2
+        uses: holy-tao/install-autohotkey@v2.0.0
+        with:
+          version: latest
+
+      - name: Download dist/YAML.ahk
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-yaml
+          path: dist
+
+      - name: Download cJSON
+        shell: pwsh
+        run: |
+          $url = "https://raw.githubusercontent.com/G33kDude/cJson.ahk/refs/heads/v2/Dist/JSON.ahk"
+          New-Item -ItemType Directory -Force -Path "tests\Lib"
+          $dest = "tests\Lib\JSON.ahk"
+          Invoke-WebRequest $url -OutFile $dest
+
+      - name: Run Conformance Tests
+        shell: pwsh
+        working-directory: tests
+        run: AutoHotkey64.exe /ErrorStdOut=UTF-8 RunConformance.ahk
+
+      - name: Upload Conformance Test Results
+        uses: actions/upload-artifact@v7
+        with:
+          name: conformance-results
+          path: tests/conformance/report.txt
 
   all-tests-passed:
     name: All Tests Passed
@@ -49,6 +106,7 @@ jobs:
     needs: test
     if: always()
     steps:
-      - name: Fail if any matrix job failed
-        if: needs.test.result != 'success'
-        run: exit 1
+      - name: Check matrix result
+        run: |
+          echo "test result: ${{ needs.test.result }}"
+          [ "${{ needs.test.result }}" = "success" ] || exit 1

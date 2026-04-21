@@ -1,0 +1,59 @@
+name: Build YAML.ahk
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+jobs:
+  build:
+    name: Build dist/YAML.ahk
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install AutoHotkey V2
+        uses: holy-tao/install-autohotkey@v2.0.0
+        with:
+          version: 2.0.24
+
+      - name: Install gcc
+        uses: msys2/setup-msys2@v2
+        with:
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+          path-type: inherit
+
+        # Unclear exactly why this is necessary but my best guess is that gcc lazy-loads some stuff or does
+        # environment setup on the first run, and the way MCL invokes it doesn't let it work.
+        # Anyways, without this warm-up step, build.ahk fails silently (not even an exit code!) when it invokes MCL.
+      - name: Warm up gcc
+        shell: powershell
+        env:
+          MSYSTEM: ''
+        run: |
+          'int __main() { return 42; }' | Out-File -Encoding ascii hello.c
+          gcc -m64 -ffreestanding -nostdlib -fno-leading-underscore -c hello.c -o hello.o
+          Write-Host "gcc exit: $LASTEXITCODE"
+          gcc -m32 -ffreestanding -nostdlib -fno-leading-underscore -c hello.c -o hello32.o
+          Write-Host "gcc -m32 exit: $LASTEXITCODE"
+          Remove-Item hello.c,hello.o,hello32.o -ErrorAction SilentlyContinue
+
+      - name: Build dist/YAML.ahk
+        shell: powershell
+        timeout-minutes: 10
+        env:
+          MSYSTEM: ''
+        run: AutoHotkey64.exe /ErrorStdOut build/build.ahk
+
+      - name: Upload dist/YAML.ahk
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist-yaml
+          path: dist/YAML.ahk
+          if-no-files-found: error

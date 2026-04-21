@@ -36,8 +36,10 @@ thisCommit := Trim(StdoutToVar("git rev-parse HEAD", A_ScriptDir).Output, "`r`n`
 FileAppend(Format("Building at {1} with libraries:`n  LibYAML: {2}`n  MCL:     {3}`n", 
     thisCommit, libYamlCommit, mclCommit), "*")
 
-if !DirExist(dist)
+if !DirExist(dist) {
+    FileAppend("Creating dist directory at " dist "`n", "*")
     DirCreate(dist)
+}
 
 libyamlFiles := ["api.c", "reader.c", "scanner.c", "parser.c",
                  "loader.c", "writer.c", "emitter.c", "dumper.c"]
@@ -87,13 +89,18 @@ rendererOptions := {
     compress: true
 }
 
-FileAppend("Compiling parse.c + dump.c + libyaml (32 and 64 bit)... ", "*")
+FileAppend("Compiling parse.c + dump.c + libyaml (32 and 64 bit)...`n", "*")
+FileAppend(Format("  code size: {} bytes`n", StrLen(code)), "*")
 
 try {
+    FileAppend("  calling MCL.StandaloneAHKFromC...`n", "*")
     standalone := MCL.StandaloneAHKFromC(code, compilerOptions, rendererOptions)
-    FileAppend("success!`n", "*")
-} catch Error as e {
-    FileAppend("`n=== COMPILER " StrUpper(Type(e)) " " e.Extra " ===`n" e.Message "`n" e.Stack "`n", "*")
+    FileAppend(Format("  returned: {} bytes of standalone output`n", StrLen(standalone)), "*")
+} catch Any as e {
+    FileAppend("`n=== CAUGHT " Type(e) " ===`n", "*")
+    FileAppend("Message: " (e.HasProp("Message") ? e.Message : "<none>") "`n", "*")
+    FileAppend("Extra:   " (e.HasProp("Extra")   ? e.Extra   : "<none>") "`n", "*")
+    FileAppend("Stack:`n" (e.HasProp("Stack")    ? e.Stack   : "<none>") "`n", "*")
     ExitApp(1)
 }
 
