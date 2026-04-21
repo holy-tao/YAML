@@ -11,8 +11,8 @@ class YAMLError extends Error {
  * reported by the parser.
  */
 class YAMLParseError extends YAMLError {
-    __New(message, line := 0, column := 0) {
-        super.__New(message)
+    __New(message, what, line := 0, column := 0) {
+        super.__New(message, what)
         this.Line := line
         this.Column := column
     }
@@ -114,7 +114,7 @@ class YAML {
             if r == -2
                 throw YAMLMultiDocError("YAML stream contains multiple documents; use YAML.LoadAll")
             msg := StrGet(this.lib.get_err_message(), "UTF-8")
-            throw YAMLParseError(msg, this.lib.g_err_line, this.lib.g_err_column)
+            throw YAMLParseError(msg, A_ThisFunc, this.lib.g_err_line, this.lib.g_err_column)
         }
 
         result := ComValue(0x400C, out.Ptr)[]
