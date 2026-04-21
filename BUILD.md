@@ -18,9 +18,10 @@ AHK facade (`src/YAML.ahk`).
    git submodule update --init --recursive
    ```
    This pulls:
-   - `src/Lib/MCL`        - Machine Code Library (Descolada fork, `v2` branch)
-   - `src/native/libyaml` - libyaml 0.2.5
-   - `tests/YUnit`        - test harness
+   - `src/Lib/MCL`             - Machine Code Library (Descolada fork, `v2` branch)
+   - `src/native/libyaml`      - libyaml 0.2.5
+   - `tests/YUnit`             - test harness
+   - `tests/yaml-test-suite`   - upstream conformance corpus (pinned to `data-2022-01-17`)
 
 ## Build
 
@@ -58,6 +59,29 @@ For a quick sanity check without the full harness:
 cd tests
 AutoHotkey64.exe .\smoke.ahk
 ```
+
+## yaml-test-suite conformance
+
+A separate, developer-only harness runs the upstream
+[yaml-test-suite](https://github.com/yaml/yaml-test-suite) (pinned to
+`data-2022-01-17`) against `dist/YAML.ahk` and writes a pass/fail summary
+to `tests/conformance/report.txt` (gitignored). It is **not** part of
+`RunTests.ahk` and has no CI integration.
+
+```powershell
+git submodule update --init tests/yaml-test-suite
+AutoHotkey64.exe .\tests\RunConformance.ahk
+```
+
+Dimensions exercised per test:
+
+- **parse** - compare `YAML.Load(in.yaml)` against `in.json`
+- **parse-error** - assert `YAML.Load(in.yaml)` throws when `error` marker present
+- **round-trip** - `YAML.Load(YAML.Dump(parsed))` equals `parsed`
+- **dump-json** - build a tree from `in.json`, `YAML.Dump` it, re-parse, compare
+
+Depends on `JSON.ahk` being reachable via `#include <JSON>` (the cJson-based
+library in the user's AHK `Lib` folder).
 
 ## Troubleshooting
 

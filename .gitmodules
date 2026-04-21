@@ -10,3 +10,6 @@
 	path = src/native/libyaml
 	url = git@github.com:yaml/libyaml.git
 	branch = master
+[submodule "tests/yaml-test-suite"]
+	path = tests/yaml-test-suite
+	url = git@github.com:yaml/yaml-test-suite.git
