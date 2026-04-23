@@ -16,6 +16,15 @@
  * iterating on C need MinGW-w64 gcc on PATH.
  */
 
+; Minimal command line processor
+HasArg(str) {
+    for arg in A_Args {
+        if arg = str
+         return true
+    }
+    return false
+}
+
 ; Log uncaught errors and exit with an error code
 OnError((thrown, mode) => (
     FileAppend(Type(thrown) ": " thrown.Message "`n`n" thrown.Stack "`n", "*"),
@@ -77,9 +86,21 @@ code := shell "`n" FileRead(native "\parse.c") "`n" FileRead(native "\dump.c")
 
 defines := ' -DYAML_VERSION_MAJOR=0 -DYAML_VERSION_MINOR=2 -DYAML_VERSION_PATCH=5 -DYAML_VERSION_STRING=\"0.2.5\" '
 
-; No `bitness` field - StandaloneAHKFromC will produce both 32 and 64 bit.
+; No `bitness` field - StandaloneAHKFromC will produce both 32 and 64 bit. Optimize for size
+constantFlags := "-mno-stack-arg-probe"
+
+; When the runner has debug logging on (re-run with "Enable debug logging" or
+; ACTIONS_STEP_DEBUG secret), ask gcc to be loud.
+if EnvGet("RUNNER_DEBUG") = "1" || HasArg("debug") {
+    constantFlags .= " -v -ftime-report -fmem-report"
+}
+
+if !EnvGet("GITHUB_ACTIONS") {
+    constantFlags .= " -Os"
+}
+
 compilerOptions := {
-    flags: " -mno-stack-arg-probe -I `"" shims "`" -I `"" libyaml "\include`" -I `"" libyamlSrc "`" -I `"" native "`" " defines
+    flags: constantFlags " -I `"" shims "`" -I `"" libyaml "\include`" -I `"" libyamlSrc "`" -I `"" native "`" " defines
 }
 
 rendererOptions := {

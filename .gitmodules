@@ -4,7 +4,7 @@
 	branch = v2
 [submodule "src/Lib/MCL"]
 	path = src/Lib/MCL
-	url = git@github.com:Descolada/MCL.ahk.git
+	url = git@github.com:holy-tao/MCL.ahk.git
 	branch = v2
 [submodule "src/native/libyaml"]
 	path = src/native/libyaml

@@ -14,6 +14,14 @@ jobs:
         with:
           submodules: recursive
 
+      # Try to prevent the runner from OOM-killing us
+      - name: Configure pagefile
+        uses: al-cheb/configure-pagefile-action@v1.4
+        with:
+          minimum-size: 16GB
+          maximum-size: 16GB
+          disk-root: "D:"
+
       - name: Install AutoHotkey V2
         uses: holy-tao/install-autohotkey@v2.0.0
         with:
@@ -49,7 +57,9 @@ jobs:
         timeout-minutes: 10
         env:
           MSYSTEM: ''
-        run: AutoHotkey64.exe /ErrorStdOut build/build.ahk
+        run: | 
+          & AutoHotkey64.exe /ErrorStdOut build/build.ahk
+          Write-Output "build.ahk exited with code $LASTEXITCODE"
 
       - name: Upload dist/YAML.ahk
         uses: actions/upload-artifact@v7
@@ -57,3 +67,6 @@ jobs:
           name: dist-yaml
           path: dist/YAML.ahk
           if-no-files-found: error
+
+      - if: failure()
+        run: Get-WinEvent -LogName Application -MaxEvents 50 | Where-Object {$_.LevelDisplayName -eq 'Error'} | Format-List
