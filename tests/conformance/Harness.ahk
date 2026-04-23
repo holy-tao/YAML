@@ -56,7 +56,7 @@ class ConformanceHarness {
         parseErrDesc := ""
 
         try {
-            parsed := YAML.Load(yamlText)
+            parsed := YAML.Parse(yamlText)
             parseOk := true
         } catch YAMLError as e {
             parseThrew := true
@@ -106,7 +106,7 @@ class ConformanceHarness {
     _RunRoundTrip(t, parsed) {
         try {
             dumped := YAML.Dump(parsed)
-            reparsed := YAML.Load(dumped)
+            reparsed := YAML.Parse(dumped)
             match := TreeCompare.Equal(parsed, reparsed)
             this._Record("round-trip", t, match, match ? "" : "reparsed tree mismatch")
         } catch as e {
@@ -117,7 +117,7 @@ class ConformanceHarness {
     _RunDumpFromJson(t, tree) {
         try {
             dumped := YAML.Dump(tree)
-            reparsed := YAML.Load(dumped)
+            reparsed := YAML.Parse(dumped)
             match := TreeCompare.Equal(tree, reparsed)
             this._Record("dump-json", t, match, match ? "" : "reparsed tree mismatch")
         } catch as e {

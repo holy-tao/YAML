@@ -94,7 +94,7 @@ class YAML {
      */
     static _LoadLib() => _YAMLMCode()
 
-    static LoadFile(path, options?) => this.Load(FileRead(path, options?))
+    static ParseFile(path, options?) => this.Load(FileRead(path, options?))
     static DumpFile(val, path, pretty := 0, encoding?)
         => FileOpen(path, "w", encoding?).Write(this.Dump(val, pretty))
 
@@ -104,7 +104,7 @@ class YAML {
      * @param {String} yaml the yaml to parse
      * @returns {Map | Array | Primitive} the parsed value
      */
-    static Load(yaml) {
+    static Parse(yaml) {
         utf8 := Buffer(StrPut(yaml, "UTF-8"), 0)
         n := StrPut(yaml, utf8, "UTF-8") - 1
 
