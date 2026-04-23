@@ -335,7 +335,7 @@ static int emit_value(yaml_emitter_t *em, VARIANT *v)
     case VT_I4:
         return emit_i64(em, v->intVal);
     case VT_I8:
-        return emit_i64(em, v->llVal);
+        return emit_i64(em, variant_get_i64(v));
     case VT_R4:
         return emit_r8(em, (double)v->fltVal);
     case VT_R8:

@@ -10,7 +10,6 @@ MCL_IMPORT(double,  msvcrt, strtod,    (const char *, char **));
 
 /* ---------------- Error info exposed to AHK ---------------- */
 
-
 static int  g_err_line;    MCL_EXPORT_GLOBAL(g_err_line, Int);
 static int  g_err_column;  MCL_EXPORT_GLOBAL(g_err_column, Int);
 static char g_err_message[256];

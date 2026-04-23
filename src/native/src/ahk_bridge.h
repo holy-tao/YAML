@@ -7,6 +7,7 @@
 #include <oaidl.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <string.h>
 
 #ifndef NULL
 #define NULL 0
@@ -151,10 +152,21 @@ static inline void variant_set_bstr(VARIANT *v, BSTR b)
     v->bstrVal = b;
 }
 
+/* MCL's windows.h shim typedefs LONGLONG to `double` on 32-bit (it mirrors an
+ * ancient DDK alignment hack). VARIANT.llVal therefore has type `double` in
+ * this TU, so a direct `v->llVal = n` silently converts through float. Read
+ * and write the 8 bytes at &v->llVal via memcpy to bypass the bad typedef. */
 static inline void variant_set_i64(VARIANT *v, int64_t n)
 {
     v->vt = VT_I8;
-    v->llVal = n;
+    memcpy(&v->llVal, &n, sizeof(n));
+}
+
+static inline int64_t variant_get_i64(const VARIANT *v)
+{
+    int64_t n;
+    memcpy(&n, &v->llVal, sizeof(n));
+    return n;
 }
 
 static inline void variant_set_r8(VARIANT *v, double d)
