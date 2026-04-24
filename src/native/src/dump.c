@@ -4,8 +4,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ---------------- Dynamic output buffer ---------------- */
-
 typedef struct {
     unsigned char *data;
     size_t size;
@@ -30,7 +28,7 @@ static int outbuf_write_handler(void *user, unsigned char *buf, size_t size)
     return 1;
 }
 
-/* ---------------- Error info (shared pattern with parse.c) ---------------- */
+#pragma region Errors
 
 static int  g_dump_err_line;   MCL_EXPORT_GLOBAL(g_dump_err_line, Int);
 static int  g_dump_err_column; MCL_EXPORT_GLOBAL(g_dump_err_column, Int);
@@ -51,12 +49,11 @@ static void set_dump_err(const char *msg)
     g_dump_err_message[i] = 0;
 }
 
-/* ---------------- Number formatting ---------------- */
-
 MCL_IMPORT(int, msvcrt, _snprintf, (char *, size_t, const char *, ...));
 #define snprintf _snprintf
 
-/* ---------------- Dispatch helpers ---------------- */
+#pragma endregion
+#pragma region Parsing / Dispatch
 
 static int call_has_method(IDispatch *obj, void *nameBstr)
 {
@@ -120,8 +117,6 @@ static int enum_next(IDispatch *en, VARIANT *pk, VARIANT *pv)
     return 1;
 }
 
-/* ---------------- Scalar string detection ---------------- */
-
 /**
  * Return 1 if a plain UTF-8 scalar would round-trip back to a non-string
  * (null, bool, int, float) per our YAML 1.1 rules, in which case we must
@@ -167,9 +162,122 @@ static int is_ambiguous_plain(const char *s, size_t n)
     return 0;
 }
 
-/* ---------------- Emitter recursion ---------------- */
+#pragma endregion
+#pragma region Pass 1 (Ref Table)
 
-static int emit_value(yaml_emitter_t *em, VARIANT *v);
+/**
+ *
+ * YAML aliases require that a shared container be marked with an anchor on
+ * first emission and referenced via `*name` thereafter. We learn which
+ * containers are shared by walking the tree once up-front, counting how
+ * many times each IDispatch pointer is reached.
+ *
+ * A count > 1 means the object is shared (multiple reachable paths) or
+ * cyclic (reached via itself). Either way, pass 2 will emit an anchor on
+ * the first visit and aliases on subsequent visits. count == 1 emits as
+ * before with no anchor.
+ *
+ * Sentinels (objNull / objTrue / objFalse) are skipped - they're global
+ * singletons, and anchoring every `null` would be noisy. 
+ */
+typedef struct {
+    IDispatch *obj;
+    int count;
+    int anchor_id;  /* 0 until assigned at first emission */
+    int emitted;    /* 1 once we've emitted the anchored definition */
+} ref_entry_t;
+
+typedef struct {
+    ref_entry_t *items;
+    int count;
+    int capacity;
+    int next_id;
+} ref_table_t;
+
+static ref_entry_t *reftab_find(ref_table_t *t, IDispatch *obj)
+{
+    for (int i = 0; i < t->count; i++)
+        if (t->items[i].obj == obj) return &t->items[i];
+    return NULL;
+}
+
+static ref_entry_t *reftab_insert(ref_table_t *t, IDispatch *obj)
+{
+    if (t->count >= t->capacity) {
+        int newcap = t->capacity ? t->capacity * 2 : 16;
+        ref_entry_t *ni = (ref_entry_t *)realloc(t->items,
+                            (size_t)newcap * sizeof(ref_entry_t));
+        if (!ni) return NULL;
+        t->items = ni;
+        t->capacity = newcap;
+    }
+    ref_entry_t *e = &t->items[t->count++];
+    e->obj = obj;
+    e->count = 1;
+    e->anchor_id = 0;
+    e->emitted = 0;
+    return e;
+}
+
+static void reftab_free(ref_table_t *t)
+{
+    if (t->items) free(t->items);
+    t->items = NULL;
+    t->count = 0;
+    t->capacity = 0;
+    t->next_id = 0;
+}
+
+static int count_value(ref_table_t *t, VARIANT *v);
+
+static int count_enum(ref_table_t *t, IDispatch *obj)
+{
+    VARIANT en;
+    if (get_enum2(obj, &en) != 0) return -1;
+    int rc = 0;
+    for (;;) {
+        VARIANT k, val;
+        if (!enum_next(en.pdispVal, &k, &val)) break;
+        if (count_value(t, &k) != 0) rc = -1;
+        if (rc == 0 && count_value(t, &val) != 0) rc = -1;
+        variant_release(&k);
+        variant_release(&val);
+        if (rc != 0) break;
+    }
+    en.pdispVal->lpVtbl->Release(en.pdispVal);
+    return rc;
+}
+
+static int count_dispatch(ref_table_t *t, IDispatch *obj)
+{
+    if (obj == objNull || obj == objTrue || obj == objFalse) return 0;
+
+    ref_entry_t *e = reftab_find(t, obj);
+    if (e) {
+        e->count++;
+        return 0;  /* already walked this subtree; stops cycles. */
+    }
+    if (!reftab_insert(t, obj)) return -1;
+
+    /* Recurse into children only on first visit. */
+    if (call_has_method(obj, s_bstrPush.szData))
+        return count_enum(t, obj);
+    if (call_has_method(obj, s_bstrSet.szData))
+        return count_enum(t, obj);
+    return 0;  /* unknown object - the emitter will error; don't here */
+}
+
+static int count_value(ref_table_t *t, VARIANT *v)
+{
+    if (v->vt == VT_DISPATCH && v->pdispVal)
+        return count_dispatch(t, v->pdispVal);
+    return 0;
+}
+
+#pragma endregion
+#pragma region Pass 2
+
+static int emit_value(yaml_emitter_t *em, ref_table_t *t, VARIANT *v);
 
 /** 
  * Emit a scalar with an explicit style choice. Numbers/bools/nulls pass
@@ -239,11 +347,13 @@ static int emit_r8(yaml_emitter_t *em, double d)
     return emit_plain(em, buf, (size_t)len);
 }
 
-static int emit_map(yaml_emitter_t *em, IDispatch *obj)
+static int emit_map(yaml_emitter_t *em, ref_table_t *t, IDispatch *obj,
+                    const char *anchor)
 {
     yaml_event_t ev;
-    if (!yaml_mapping_start_event_initialize(&ev, NULL, NULL, 1,
-                                              YAML_BLOCK_MAPPING_STYLE))
+    if (!yaml_mapping_start_event_initialize(&ev,
+            (yaml_char_t *)anchor, NULL, 1,
+            YAML_BLOCK_MAPPING_STYLE))
         return -1;
     if (!yaml_emitter_emit(em, &ev)) return -1;
 
@@ -256,12 +366,10 @@ static int emit_map(yaml_emitter_t *em, IDispatch *obj)
     for (;;) {
         VARIANT k, v;
         if (!enum_next(en.pdispVal, &k, &v)) break;
-        if (emit_value(em, &k) != 0) { rc = -1; }
-        if (rc == 0 && emit_value(em, &v) != 0) { rc = -1; }
-        if (k.vt == VT_DISPATCH && k.pdispVal) k.pdispVal->lpVtbl->Release(k.pdispVal);
-        else if (k.vt == VT_BSTR && k.bstrVal) SysFreeString(k.bstrVal);
-        if (v.vt == VT_DISPATCH && v.pdispVal) v.pdispVal->lpVtbl->Release(v.pdispVal);
-        else if (v.vt == VT_BSTR && v.bstrVal) SysFreeString(v.bstrVal);
+        if (emit_value(em, t, &k) != 0) { rc = -1; }
+        if (rc == 0 && emit_value(em, t, &v) != 0) { rc = -1; }
+        variant_release(&k);
+        variant_release(&v);
         if (rc != 0) break;
     }
     en.pdispVal->lpVtbl->Release(en.pdispVal);
@@ -272,11 +380,13 @@ static int emit_map(yaml_emitter_t *em, IDispatch *obj)
     return 0;
 }
 
-static int emit_array(yaml_emitter_t *em, IDispatch *obj)
+static int emit_array(yaml_emitter_t *em, ref_table_t *t, IDispatch *obj,
+                      const char *anchor)
 {
     yaml_event_t ev;
-    if (!yaml_sequence_start_event_initialize(&ev, NULL, NULL, 1,
-                                                YAML_BLOCK_SEQUENCE_STYLE))
+    if (!yaml_sequence_start_event_initialize(&ev,
+            (yaml_char_t *)anchor, NULL, 1,
+            YAML_BLOCK_SEQUENCE_STYLE))
         return -1;
     if (!yaml_emitter_emit(em, &ev)) return -1;
 
@@ -290,11 +400,9 @@ static int emit_array(yaml_emitter_t *em, IDispatch *obj)
         VARIANT k, v;
         if (!enum_next(en.pdispVal, &k, &v)) break;
         /* For arrays, __Enum(2) yields (index, value). We only need value. */
-        if (emit_value(em, &v) != 0) rc = -1;
-        if (k.vt == VT_DISPATCH && k.pdispVal) k.pdispVal->lpVtbl->Release(k.pdispVal);
-        else if (k.vt == VT_BSTR && k.bstrVal) SysFreeString(k.bstrVal);
-        if (v.vt == VT_DISPATCH && v.pdispVal) v.pdispVal->lpVtbl->Release(v.pdispVal);
-        else if (v.vt == VT_BSTR && v.bstrVal) SysFreeString(v.bstrVal);
+        if (emit_value(em, t, &v) != 0) rc = -1;
+        variant_release(&k);
+        variant_release(&v);
         if (rc != 0) break;
     }
     en.pdispVal->lpVtbl->Release(en.pdispVal);
@@ -305,25 +413,45 @@ static int emit_array(yaml_emitter_t *em, IDispatch *obj)
     return 0;
 }
 
-static int emit_dispatch(yaml_emitter_t *em, IDispatch *obj)
+static int emit_dispatch(yaml_emitter_t *em, ref_table_t *t, IDispatch *obj)
 {
     /* Sentinels first (pointer identity). */
     if (obj == objNull)  return emit_plain(em, "null", 4);
     if (obj == objTrue)  return emit_plain(em, "true",  4);
     if (obj == objFalse) return emit_plain(em, "false", 5);
 
+    /* Anchor/alias bookkeeping. Objects with count > 1 are shared or cyclic
+     * and need an anchor on the first emission, aliases on the rest. */
+    char anchor_buf[16];
+    const char *anchor = NULL;
+    ref_entry_t *e = reftab_find(t, obj);
+    if (e && e->count > 1) {
+        if (e->emitted) {
+            snprintf(anchor_buf, sizeof(anchor_buf), "a%d", e->anchor_id);
+            yaml_event_t ev;
+            if (!yaml_alias_event_initialize(&ev, (yaml_char_t *)anchor_buf))
+                return -1;
+            if (!yaml_emitter_emit(em, &ev)) return -1;
+            return 0;
+        }
+        e->anchor_id = ++t->next_id;
+        e->emitted = 1;
+        snprintf(anchor_buf, sizeof(anchor_buf), "a%d", e->anchor_id);
+        anchor = anchor_buf;
+    }
+
     /* Detect Array vs Map via HasMethod. Order matters: Map also has .Set,
      * Array has .Push; Arrays don't have Set, Maps don't have Push. */
     if (call_has_method(obj, s_bstrPush.szData))
-        return emit_array(em, obj);
+        return emit_array(em, t, obj, anchor);
     if (call_has_method(obj, s_bstrSet.szData))
-        return emit_map(em, obj);
+        return emit_map(em, t, obj, anchor);
 
     set_dump_err("Unsupported object type (not Map or Array)");
     return -1;
 }
 
-static int emit_value(yaml_emitter_t *em, VARIANT *v)
+static int emit_value(yaml_emitter_t *em, ref_table_t *t, VARIANT *v)
 {
     switch (v->vt) {
     case VT_EMPTY:
@@ -345,14 +473,15 @@ static int emit_value(yaml_emitter_t *em, VARIANT *v)
     case VT_DISPATCH:
         if (!v->pdispVal)
             return emit_plain(em, "null", 4);
-        return emit_dispatch(em, v->pdispVal);
+        return emit_dispatch(em, t, v->pdispVal);
     default:
         set_dump_err("Unsupported VARIANT type");
         return -1;
     }
 }
 
-/* ---------------- Entry points ---------------- */
+#pragma endregion
+#pragma region Entry Point
 
 MCL_EXPORT(dumps, Ptr, pIn, Int, bPretty, Ptr, ppOut, Ptr, pOutSize, CDecl_Int);
 int dumps(VARIANT *pIn, int bPretty, unsigned char **ppOut, int64_t *pOutSize)
@@ -362,6 +491,14 @@ int dumps(VARIANT *pIn, int bPretty, unsigned char **ppOut, int64_t *pOutSize)
     *pOutSize = 0;
 
     outbuf_t ob = { .data = NULL, .size = 0, .capacity = 0, .oom = 0 };
+    ref_table_t rt = { NULL, 0, 0, 0 };
+
+    /* Pass 1: count references so we know which objects need anchors. */
+    if (count_value(&rt, pIn) != 0) {
+        set_dump_err("reference table overflow");
+        reftab_free(&rt);
+        return -1;
+    }
 
     yaml_emitter_t em;
     if (!yaml_emitter_initialize(&em)) {
@@ -382,7 +519,7 @@ int dumps(VARIANT *pIn, int bPretty, unsigned char **ppOut, int64_t *pOutSize)
     if (!yaml_document_start_event_initialize(&ev, NULL, NULL, NULL, 1) ||
         !yaml_emitter_emit(&em, &ev)) { rc = -1; goto done; }
 
-    if (emit_value(&em, pIn) != 0) { rc = -1; goto done; }
+    if (emit_value(&em, &rt, pIn) != 0) { rc = -1; goto done; }
 
     if (!yaml_document_end_event_initialize(&ev, 1) ||
         !yaml_emitter_emit(&em, &ev)) { rc = -1; goto done; }
@@ -395,6 +532,7 @@ done:
         set_dump_err(em.problem ? em.problem : "emitter failed");
     }
     yaml_emitter_delete(&em);
+    reftab_free(&rt);
 
     if (rc == 0) {
         *ppOut = ob.data;
