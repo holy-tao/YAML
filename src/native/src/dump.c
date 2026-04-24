@@ -124,7 +124,7 @@ static int enum_next(IDispatch *en, VARIANT *pk, VARIANT *pv)
 
 /**
  * Return 1 if a plain UTF-8 scalar would round-trip back to a non-string
- * (null, bool, int, float) per our YAML 1.1 rules â€” in which case we must
+ * (null, bool, int, float) per our YAML 1.1 rules, in which case we must
  * emit the string in double-quoted style. 
  */
 static int is_ambiguous_plain(const char *s, size_t n)
