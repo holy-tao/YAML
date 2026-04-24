@@ -54,9 +54,11 @@ MCL_IMPORT(int, Kernel32, WideCharToMultiByte,
 
 static IID g_IID_NULL[16] = {0};
 
-/* Pre-built BSTRs for methods we invoke by name. AHK's BSTRs use a 4-byte
+/**
+ * Pre-built BSTRs for methods we invoke by name. AHK's BSTRs use a 4-byte
  * length prefix immediately before the string data; DECLARE_BSTR mirrors
- * cjson_dumps.c's pattern. Must be used read-only; never SysFreeString. */
+ * cjson_dumps.c's pattern. Must be used read-only; never SysFreeString.
+ */
 #define DECLARE_BSTR(Variable, String) \
 struct {                               \
     uint32_t uLength;                  \
@@ -138,8 +140,40 @@ static BSTR bstr_from_utf8(const char *src, int cb)
     return out;
 }
 
-/* Populate a VARIANT as a VT_DISPATCH, bumping refcount expectations are
- * left to the caller - ObjRelease is handled on the AHK side after unwrap. */
+static void variant_release(VARIANT *v)
+{
+    if (v->vt == VT_BSTR && v->bstrVal) {
+        SysFreeString(v->bstrVal);
+    } else if (v->vt == VT_DISPATCH && v->pdispVal) {
+        v->pdispVal->lpVtbl->Release(v->pdispVal);
+    }
+    v->vt = VT_EMPTY;
+}
+
+/**
+ * Bitwise copy with AddRef on IDispatch / SysAllocStringLen on BSTR.
+ */
+static int variant_dupe(VARIANT *dst, const VARIANT *src)
+{
+    *dst = *src;
+    if (src->vt == VT_BSTR) {
+        if (src->bstrVal) {
+            UINT len = 0;
+            while (src->bstrVal[len]) len++;
+            dst->bstrVal = SysAllocStringLen(src->bstrVal, len);
+            if (!dst->bstrVal) { dst->vt = VT_EMPTY; return -1; }
+        }
+    } else if (src->vt == VT_DISPATCH) {
+        if (src->pdispVal)
+            src->pdispVal->lpVtbl->AddRef(src->pdispVal);
+    }
+    return 0;
+}
+
+/**
+ * Populate a VARIANT as a VT_DISPATCH, bumping refcount expectations are
+ * left to the caller - ObjRelease is handled on the AHK side after unwrap. 
+ */
 static inline void variant_set_dispatch(VARIANT *v, IDispatch *p)
 {
     v->vt = VT_DISPATCH;
@@ -152,10 +186,12 @@ static inline void variant_set_bstr(VARIANT *v, BSTR b)
     v->bstrVal = b;
 }
 
-/* MCL's windows.h shim typedefs LONGLONG to `double` on 32-bit (it mirrors an
+/**
+ * MCL's windows.h shim typedefs LONGLONG to `double` on 32-bit (it mirrors an
  * ancient DDK alignment hack). VARIANT.llVal therefore has type `double` in
  * this TU, so a direct `v->llVal = n` silently converts through float. Read
- * and write the 8 bytes at &v->llVal via memcpy to bypass the bad typedef. */
+ * and write the 8 bytes at &v->llVal via memcpy to bypass the bad typedef. 
+ * */
 static inline void variant_set_i64(VARIANT *v, int64_t n)
 {
     v->vt = VT_I8;

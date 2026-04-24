@@ -8,7 +8,8 @@
 MCL_IMPORT(int64_t, msvcrt, _strtoi64, (const char *, char **, int));
 MCL_IMPORT(double,  msvcrt, strtod,    (const char *, char **));
 
-/* ---------------- Error info exposed to AHK ---------------- */
+#pragma region Errors
+// Error info exposed to AHK
 
 static int  g_err_line;    MCL_EXPORT_GLOBAL(g_err_line, Int);
 static int  g_err_column;  MCL_EXPORT_GLOBAL(g_err_column, Int);
@@ -29,7 +30,8 @@ static void set_err(const char *msg, int line, int col)
     g_err_message[i] = 0;
 }
 
-/* ---------------- Scalar resolution (YAML 1.1 core) ---------------- */
+#pragma endregion
+#pragma region Scalar Resolution
 
 static int buf_eq(const char *s, size_t n, const char *lit)
 {
@@ -177,7 +179,7 @@ static int emit_scalar(yaml_event_t *ev, VARIANT *out)
     return 0;
 }
 
-/* ---------------- Container stack ---------------- */
+#pragma region Container Stack
 
 typedef enum { FRAME_MAP, FRAME_ARRAY } frame_kind_t;
 
@@ -236,7 +238,100 @@ static int assign_to_top(frame_t *top, VARIANT *value)
     return 0;
 }
 
-/* ---------------- Entry point ---------------- */
+#pragma endregion
+#pragma region Anchors / Aliases
+
+/**
+ *
+ * An anchor definition registers its value under a name; a later alias event
+ * retrieves and reuses that value. For containers the registered VARIANT
+ * holds an AddRef'd IDispatch, so the resulting tree shares the same AHK
+ * object across every alias site (mutating one mutates all).
+ *
+ * Registration happens on the *start* event for containers, so recursive
+ * anchors like `&a [*a]` find themselves already in the table. */
+
+typedef struct {
+    char   *name;   /* owned, NUL-terminated UTF-8 */
+    VARIANT value;  /* owns its AddRef / BSTR allocation */
+} anchor_entry_t;
+
+typedef struct {
+    anchor_entry_t *items;
+    int count;
+    int capacity;
+} anchor_registry_t;
+
+#define MAX_ANCHORS 1024
+
+static int anchor_name_eq(const char *a, const unsigned char *b)
+{
+    size_t i = 0;
+    while (a[i] && b[i] && a[i] == (char)b[i]) i++;
+    return a[i] == 0 && b[i] == 0;
+}
+
+static int registry_set(anchor_registry_t *r, const unsigned char *name,
+                        const VARIANT *value)
+{
+    /* Overwrite: YAML permits anchor redefinition. */
+    for (int i = 0; i < r->count; i++) {
+        if (anchor_name_eq(r->items[i].name, name)) {
+            variant_release(&r->items[i].value);
+            return variant_dupe(&r->items[i].value, value);
+        }
+    }
+    if (r->count >= MAX_ANCHORS) return -1;
+    if (r->count >= r->capacity) {
+        int newcap = r->capacity ? r->capacity * 2 : 16;
+        anchor_entry_t *ni = (anchor_entry_t *)realloc(r->items,
+                                (size_t)newcap * sizeof(anchor_entry_t));
+        if (!ni) return -1;
+        r->items = ni;
+        r->capacity = newcap;
+    }
+
+    size_t nlen = 0;
+    while (name[nlen]) nlen++;
+    char *nm = (char *)malloc(nlen + 1);
+    if (!nm) return -1;
+    memcpy(nm, name, nlen + 1);
+
+    r->items[r->count].name = nm;
+    r->items[r->count].value.vt = VT_EMPTY;
+    if (variant_dupe(&r->items[r->count].value, value) != 0) {
+        free(nm);
+        return -1;
+    }
+    r->count++;
+    return 0;
+}
+
+static int registry_get(anchor_registry_t *r, const unsigned char *name,
+                        VARIANT *out)
+{
+    for (int i = 0; i < r->count; i++) {
+        if (anchor_name_eq(r->items[i].name, name))
+            return variant_dupe(out, &r->items[i].value);
+    }
+    out->vt = VT_EMPTY;
+    return -1;
+}
+
+static void registry_free(anchor_registry_t *r)
+{
+    for (int i = 0; i < r->count; i++) {
+        if (r->items[i].name) free(r->items[i].name);
+        variant_release(&r->items[i].value);
+    }
+    if (r->items) free(r->items);
+    r->items = NULL;
+    r->count = 0;
+    r->capacity = 0;
+}
+
+#pragma endregion
+#pragma region Parse Loop
 
 MCL_EXPORT(loads, Ptr, utf8, Int64, len, Ptr, pOut, CDecl_Int);
 int loads(const char *utf8, int64_t len, VARIANT *pOut)
@@ -256,6 +351,8 @@ int loads(const char *utf8, int64_t len, VARIANT *pOut)
     // TODO move stack to heap and remove -mno-stack-arg-probe from compiler flags for safety
     frame_t stack[MAX_DEPTH];
     int depth = 0;
+
+    anchor_registry_t registry = { NULL, 0, 0 };
 
     int doc_count = 0;
     VARIANT doc_root;
@@ -294,15 +391,33 @@ int loads(const char *utf8, int64_t len, VARIANT *pOut)
             done = 1;
             break;
 
-        case YAML_ALIAS_EVENT:
-            set_err("Anchors/aliases not supported yet", 0, 0);
-            rc = -1;
-            done = 1;
+        case YAML_ALIAS_EVENT: {
+            VARIANT v;
+            if (registry_get(&registry, ev.data.alias.anchor, &v) != 0) {
+                set_err("undefined anchor",
+                        (int)ev.start_mark.line + 1,
+                        (int)ev.start_mark.column + 1);
+                rc = -1; done = 1; break;
+            }
+            if (depth == 0) {
+                doc_root = v;
+                have_doc_root = 1;
+            } else {
+                if (assign_to_top(&stack[depth - 1], &v) != 0) { rc = -1; done = 1; }
+            }
             break;
+        }
 
         case YAML_SCALAR_EVENT: {
             VARIANT v;
             if (emit_scalar(&ev, &v) != 0) { rc = -1; done = 1; break; }
+            if (ev.data.scalar.anchor) {
+                if (registry_set(&registry, ev.data.scalar.anchor, &v) != 0) {
+                    set_err("anchor registration failed", 0, 0);
+                    variant_release(&v);
+                    rc = -1; done = 1; break;
+                }
+            }
             if (depth == 0) {
                 doc_root = v;
                 have_doc_root = 1;
@@ -323,6 +438,19 @@ int loads(const char *utf8, int64_t len, VARIANT *pOut)
             if (!obj) {
                 set_err("Failed to construct Map/Array", 0, 0);
                 rc = -1; done = 1; break;
+            }
+            const unsigned char *anchor = is_map
+                ? ev.data.mapping_start.anchor
+                : ev.data.sequence_start.anchor;
+            if (anchor) {
+                VARIANT vd;
+                vd.vt = VT_DISPATCH;
+                vd.pdispVal = obj;   /* registry_set AddRefs via dup_variant */
+                if (registry_set(&registry, anchor, &vd) != 0) {
+                    set_err("anchor registration failed", 0, 0);
+                    obj->lpVtbl->Release(obj);
+                    rc = -1; done = 1; break;
+                }
             }
             stack[depth].kind = is_map ? FRAME_MAP : FRAME_ARRAY;
             stack[depth].obj = obj;
@@ -355,6 +483,7 @@ int loads(const char *utf8, int64_t len, VARIANT *pOut)
     }
 
     yaml_parser_delete(&parser);
+    registry_free(&registry);
 
     if (rc == 0) {
         if (have_doc_root) {
@@ -378,3 +507,5 @@ int loads(const char *utf8, int64_t len, VARIANT *pOut)
 
     return rc;
 }
+
+#pragma endregion

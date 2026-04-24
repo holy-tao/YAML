@@ -14,6 +14,7 @@
 #Include ./YAML/RoundTrip.test.ahk
 #Include ./YAML/Errors.test.ahk
 #Include ./YAML/Config.test.ahk
+#Include ./YAML/Anchors.test.ahk
 
 YUnit.Use(YunitResultCounter, YUnitJUnit, YUnitStdOut).Test(
 	ScalarsTest,
@@ -22,6 +23,7 @@ YUnit.Use(YunitResultCounter, YUnitJUnit, YUnitStdOut).Test(
 	RoundTripTest,
 	ErrorsTest,
 	ConfigTest,
+	AnchorsTest,
 )
 
 Exit(-YunitResultCounter.failures)

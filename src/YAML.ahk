@@ -99,8 +99,13 @@ class YAML {
         => FileOpen(path, "w", encoding?).Write(this.Dump(val, pretty))
 
     /**
-     * Parse a YAML string into an AHK value. Single-document only;
-     * multi-document streams throw YAMLMultiDocError.
+     * Parse a YAML string into an AHK value. Single-document only; multi-document streams throw 
+     * {@link YAMLMultiDocError `YAMLMultiDocError`}.
+     *
+     * {@link https://yaml.org/spec/1.1/#id863390 Anchors} (`&name`) and aliases (`*name`) are resolved to shared
+     * references: every alias site points at the same AHK Map/Array, so mutating through one alias is visible through
+     * the others. Recursive anchors (e.g. `&a [*a]`) produce self-referential containers.
+     *
      * @param {String} yaml the yaml to parse
      * @returns {Map | Array | Primitive} the parsed value
      */
