@@ -192,6 +192,99 @@ typedef struct {
 
 #define MAX_DEPTH 256
 
+/* Current event position, refreshed at the top of each event. Used by helpers
+ * that don't otherwise have the yaml_event_t in scope (e.g. merge-key errors
+ * raised from deep inside assign_to_top). */
+static int g_cur_line;
+static int g_cur_col;
+
+/* True iff `key` is exactly the two-character BSTR "<<". */
+static int is_merge_key(BSTR key)
+{
+    return key && key[0] == L'<' && key[1] == L'<' && key[2] == 0;
+}
+
+/**
+ * Merge entries from `src` into `dst`, skipping keys already present in `dst`.
+ * Only string keys are considered; non-string keys are ignored (merge sources
+ * built from YAML always have BSTR keys, matching the parser's invariant).
+ */
+static int merge_one(IDispatch *dst, IDispatch *src)
+{
+    VARIANT en;
+    if (get_enum2(src, &en) != 0) {
+        set_err("Failed to enumerate merge source mapping",
+                g_cur_line, g_cur_col);
+        return -1;
+    }
+    int rc = 0;
+    for (;;) {
+        VARIANT k, v;
+        if (!enum_next(en.pdispVal, &k, &v)) break;
+        if (k.vt == VT_BSTR && k.bstrVal) {
+            if (!ahk_map_has(dst, k.bstrVal)) {
+                if (ahk_map_set(dst, k.bstrVal, &v) != S_OK) {
+                    set_err("Map set failed", g_cur_line, g_cur_col);
+                    rc = -1;
+                }
+            }
+        }
+        variant_release(&k);
+        variant_release(&v);
+        if (rc != 0) break;
+    }
+    en.pdispVal->lpVtbl->Release(en.pdispVal);
+    return rc;
+}
+
+/**
+ * Handle a `<<:` value. Accepts:
+ *   - a Map (single merge source)
+ *   - an Array of Maps (earlier items override later ones)
+ * Anything else raises an error.
+ */
+static int perform_merge(IDispatch *dst, VARIANT *src)
+{
+    if (src->vt != VT_DISPATCH || !src->pdispVal) {
+        set_err("Merge value must be a mapping or sequence of mappings",
+                g_cur_line, g_cur_col);
+        return -1;
+    }
+    IDispatch *obj = src->pdispVal;
+    if (call_has_method(obj, s_bstrSet.szData)) {
+        return merge_one(dst, obj);
+    }
+    if (call_has_method(obj, s_bstrPush.szData)) {
+        VARIANT en;
+        if (get_enum2(obj, &en) != 0) {
+            set_err("Failed to enumerate merge source sequence",
+                    g_cur_line, g_cur_col);
+            return -1;
+        }
+        int rc = 0;
+        for (;;) {
+            VARIANT idx, item;
+            if (!enum_next(en.pdispVal, &idx, &item)) break;
+            if (item.vt != VT_DISPATCH || !item.pdispVal ||
+                !call_has_method(item.pdispVal, s_bstrSet.szData)) {
+                set_err("Merge sequence items must all be mappings",
+                        g_cur_line, g_cur_col);
+                rc = -1;
+            } else if (merge_one(dst, item.pdispVal) != 0) {
+                rc = -1;
+            }
+            variant_release(&idx);
+            variant_release(&item);
+            if (rc != 0) break;
+        }
+        en.pdispVal->lpVtbl->Release(en.pdispVal);
+        return rc;
+    }
+    set_err("Merge value must be a mapping or sequence of mappings",
+            g_cur_line, g_cur_col);
+    return -1;
+}
+
 /**
  * Assign `value` into the top-of-stack container.
  * For maps, alternates between capturing a key and binding key->value.
@@ -214,7 +307,9 @@ static int assign_to_top(frame_t *top, VARIANT *value)
     if (!top->has_key) {
         /* Key must be a BSTR (YAML allows complex keys; we coerce or reject). */
         if (value->vt != VT_BSTR) {
-            set_err("Non-string map keys are not supported yet", 0, 0);
+            char msg[64];
+            snprintf(msg, sizeof(msg), "Non-string map keys not supported yet (vt=%d)", (int)value->vt);                                             
+            set_err(msg, g_cur_line, g_cur_col);
             return -1;
         }
         top->pending_key = value->bstrVal;
@@ -223,8 +318,13 @@ static int assign_to_top(frame_t *top, VARIANT *value)
     }
 
     /* Have key = this value completes the pair. */
-    HRESULT hr = ahk_map_set(top->obj, top->pending_key, value);
-    if (hr != S_OK) { set_err("Map set failed", 0, 0); return -1; }
+    int rc = 0;
+    if (bResolveMergeKeys && is_merge_key(top->pending_key)) {
+        rc = perform_merge(top->obj, value);
+    } else {
+        HRESULT hr = ahk_map_set(top->obj, top->pending_key, value);
+        if (hr != S_OK) { set_err("Map set failed", 0, 0); rc = -1; }
+    }
 
     /* Release key BSTR and our ref on the value. */
     SysFreeString(top->pending_key);
@@ -235,7 +335,7 @@ static int assign_to_top(frame_t *top, VARIANT *value)
     } else if (value->vt == VT_BSTR && value->bstrVal) {
         SysFreeString(value->bstrVal);
     }
-    return 0;
+    return rc;
 }
 
 #pragma endregion
@@ -372,6 +472,8 @@ int loads(const char *utf8, int64_t len, VARIANT *pOut)
         }
 
         int done = 0;
+        g_cur_line = (int)ev.start_mark.line + 1;
+        g_cur_col  = (int)ev.start_mark.column + 1;
 
         switch (ev.type) {
         case YAML_STREAM_START_EVENT:

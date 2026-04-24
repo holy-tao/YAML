@@ -49,73 +49,8 @@ static void set_dump_err(const char *msg)
     g_dump_err_message[i] = 0;
 }
 
-MCL_IMPORT(int, msvcrt, _snprintf, (char *, size_t, const char *, ...));
-#define snprintf _snprintf
-
 #pragma endregion
 #pragma region Parsing / Dispatch
-
-static int call_has_method(IDispatch *obj, void *nameBstr)
-{
-    LPOLESTR nm = (LPOLESTR)L"HasMethod";
-    DISPID dispid = 0;
-    if (obj->lpVtbl->GetIDsOfNames(obj, g_IID_NULL, &nm, 1, 0, &dispid) != S_OK)
-        return 0;
-
-    VARIANT arg = { .vt = VT_BSTR, .bstrVal = (BSTR)nameBstr };
-    DISPPARAMS dp = { .cArgs = 1, .cNamedArgs = 0, .rgvarg = &arg };
-    VARIANT r = { .vt = VT_EMPTY };
-    if (obj->lpVtbl->Invoke(obj, dispid, g_IID_NULL, 0, DISPATCH_METHOD,
-                             &dp, &r, NULL, NULL) != S_OK)
-        return 0;
-    return (r.vt == VT_I4 && r.intVal != 0) ||
-           (r.vt == VT_I8 && r.llVal != 0) ||
-           (r.vt == VT_BOOL && r.boolVal != 0);
-}
-
-/** 
- * Obtain a 2-arg enumerator from an AHK object, analagous to `enum := obj.__Enum(2)`.
- * Returns VT_DISPATCH or VT_EMPTY.
- */
-static int get_enum2(IDispatch *obj, VARIANT *outEnum)
-{
-    LPOLESTR nm = (LPOLESTR)L"__Enum";
-    DISPID dispid = 0;
-    if (obj->lpVtbl->GetIDsOfNames(obj, g_IID_NULL, &nm, 1, 0, &dispid) != S_OK)
-        return -1;
-
-    VARIANT two = { .vt = VT_I4, .intVal = 2 };
-    DISPPARAMS dp = { .cArgs = 1, .cNamedArgs = 0, .rgvarg = &two };
-    outEnum->vt = VT_EMPTY;
-    HRESULT hr = obj->lpVtbl->Invoke(obj, dispid, g_IID_NULL, 0,
-                                      DISPATCH_METHOD | DISPATCH_PROPERTYGET,
-                                      &dp, outEnum, NULL, NULL);
-    if (hr != S_OK || outEnum->vt != VT_DISPATCH) return -1;
-    return 0;
-}
-
-/* Call enum.Call(&k, &v). Returns 1 if a pair was produced, 0 on end. */
-static int enum_next(IDispatch *en, VARIANT *pk, VARIANT *pv)
-{
-    VARIANT k_ = { .vt = VT_EMPTY };
-    VARIANT v_ = { .vt = VT_EMPTY };
-    VARIANT ak = { .vt = VT_BYREF | VT_VARIANT, .pvarVal = &k_ };
-    VARIANT av = { .vt = VT_BYREF | VT_VARIANT, .pvarVal = &v_ };
-
-    /* rgvarg is reversed: last formal is first in array */
-    VARIANT args[2] = { av, ak };
-    DISPPARAMS dp = { .cArgs = 2, .cNamedArgs = 0, .rgvarg = args };
-    VARIANT r = { .vt = VT_EMPTY };
-    HRESULT hr = en->lpVtbl->Invoke(en, 0, g_IID_NULL, 0, DISPATCH_METHOD,
-                                     &dp, &r, NULL, NULL);
-    if (hr != S_OK) return 0;
-    if (!(r.vt == VT_I4 && r.intVal != 0) &&
-        !(r.vt == VT_I8 && r.llVal != 0) &&
-        !(r.vt == VT_BOOL && r.boolVal != 0)) return 0;
-    *pk = k_;
-    *pv = v_;
-    return 1;
-}
 
 /**
  * Return 1 if a plain UTF-8 scalar would round-trip back to a non-string

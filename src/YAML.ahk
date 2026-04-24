@@ -50,6 +50,16 @@ class YAML {
     }
 
     /**
+     * When true (default), the YAML 1.1 merge key (`<<`) splices the
+     * referenced mapping's entries into the current map at load time.
+     * When false, `<<` is kept as a literal key with its raw value.
+     */
+    static ResolveMergeKeys {
+        get => this.lib.bResolveMergeKeys
+        set => this.lib.bResolveMergeKeys := value
+    }
+
+    /**
      * Sentinel for YAML null. Returned from Parse when NullsAsStrings=false.
      */
     static Null {

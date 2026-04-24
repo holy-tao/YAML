@@ -31,6 +31,8 @@ static bool bNullsAsStrings = true;
 MCL_EXPORT_GLOBAL(bNullsAsStrings, Int);
 static bool bBoolsAsInts = true;
 MCL_EXPORT_GLOBAL(bBoolsAsInts, Int);
+static bool bResolveMergeKeys = true;
+MCL_EXPORT_GLOBAL(bResolveMergeKeys, Int);
 
 /* ---------- OleAut32 imports ---------- */
 
@@ -49,6 +51,11 @@ MCL_IMPORT(int, Kernel32, WideCharToMultiByte,
             const char *lpDefaultChar, int *lpUsedDefaultChar));
 
 #define CP_UTF8 65001
+
+/* ---------- C Runtime functions ---------- */
+
+MCL_IMPORT(int, msvcrt, _snprintf, (char *, size_t, const char *, ...));
+#define snprintf _snprintf
 
 /* ---------- COM helpers ---------- */
 
@@ -69,6 +76,7 @@ DECLARE_BSTR(static s_bstrPush,      L"Push")
 DECLARE_BSTR(static s_bstrSet,       L"Set")
 DECLARE_BSTR(static s_bstrHasMethod, L"HasMethod")
 DECLARE_BSTR(static s_bstrEnum,      L"__Enum")
+DECLARE_BSTR(static s_bstrHas,       L"Has")
 
 /* Construct a fresh AHK Map via fnGetMap(). */
 static IDispatch *ahk_new_map(void)
@@ -126,6 +134,88 @@ static HRESULT ahk_array_push(IDispatch *arr, VARIANT *value)
     DISPPARAMS dp = {.cArgs = 1, .cNamedArgs = 0, .rgvarg = value};
     return arr->lpVtbl->Invoke(arr, dispidPush, g_IID_NULL, 0,
                                 DISPATCH_METHOD, &dp, NULL, NULL, NULL);
+}
+
+/* obj.HasMethod(nameBstr) -> boolean. nameBstr is a DECLARE_BSTR szData pointer. */
+static int call_has_method(IDispatch *obj, void *nameBstr)
+{
+    LPOLESTR nm = (LPOLESTR)s_bstrHasMethod.szData;
+    DISPID dispid = 0;
+    if (obj->lpVtbl->GetIDsOfNames(obj, g_IID_NULL, &nm, 1, 0, &dispid) != S_OK)
+        return 0;
+
+    VARIANT arg = { .vt = VT_BSTR, .bstrVal = (BSTR)nameBstr };
+    DISPPARAMS dp = { .cArgs = 1, .cNamedArgs = 0, .rgvarg = &arg };
+    VARIANT r = { .vt = VT_EMPTY };
+    if (obj->lpVtbl->Invoke(obj, dispid, g_IID_NULL, 0, DISPATCH_METHOD,
+                             &dp, &r, NULL, NULL) != S_OK)
+        return 0;
+    return (r.vt == VT_I4 && r.intVal != 0) ||
+           (r.vt == VT_I8 && r.llVal != 0) ||
+           (r.vt == VT_BOOL && r.boolVal != 0);
+}
+
+/* map.Has(key) -> 1 if present, 0 otherwise (also 0 on dispatch failure). */
+static int ahk_map_has(IDispatch *map, BSTR key)
+{
+    LPOLESTR nm = (LPOLESTR)s_bstrHas.szData;
+    DISPID dispid = 0;
+    if (map->lpVtbl->GetIDsOfNames(map, g_IID_NULL, &nm, 1, 0, &dispid) != S_OK)
+        return 0;
+
+    VARIANT arg = { .vt = VT_BSTR, .bstrVal = key };
+    DISPPARAMS dp = { .cArgs = 1, .cNamedArgs = 0, .rgvarg = &arg };
+    VARIANT r = { .vt = VT_EMPTY };
+    if (map->lpVtbl->Invoke(map, dispid, g_IID_NULL, 0, DISPATCH_METHOD,
+                             &dp, &r, NULL, NULL) != S_OK)
+        return 0;
+    return (r.vt == VT_I4 && r.intVal != 0) ||
+           (r.vt == VT_I8 && r.llVal != 0) ||
+           (r.vt == VT_BOOL && r.boolVal != 0);
+}
+
+/**
+ * Obtain a 2-arg enumerator from an AHK object, analagous to `enum := obj.__Enum(2)`.
+ * Returns 0 on success with outEnum=VT_DISPATCH; -1 on failure with outEnum=VT_EMPTY.
+ */
+static int get_enum2(IDispatch *obj, VARIANT *outEnum)
+{
+    LPOLESTR nm = (LPOLESTR)s_bstrEnum.szData;
+    DISPID dispid = 0;
+    if (obj->lpVtbl->GetIDsOfNames(obj, g_IID_NULL, &nm, 1, 0, &dispid) != S_OK)
+        return -1;
+
+    VARIANT two = { .vt = VT_I4, .intVal = 2 };
+    DISPPARAMS dp = { .cArgs = 1, .cNamedArgs = 0, .rgvarg = &two };
+    outEnum->vt = VT_EMPTY;
+    HRESULT hr = obj->lpVtbl->Invoke(obj, dispid, g_IID_NULL, 0,
+                                      DISPATCH_METHOD | DISPATCH_PROPERTYGET,
+                                      &dp, outEnum, NULL, NULL);
+    if (hr != S_OK || outEnum->vt != VT_DISPATCH) return -1;
+    return 0;
+}
+
+/* Call enum.Call(&k, &v). Returns 1 if a pair was produced, 0 on end. */
+static int enum_next(IDispatch *en, VARIANT *pk, VARIANT *pv)
+{
+    VARIANT k_ = { .vt = VT_EMPTY };
+    VARIANT v_ = { .vt = VT_EMPTY };
+    VARIANT ak = { .vt = VT_BYREF | VT_VARIANT, .pvarVal = &k_ };
+    VARIANT av = { .vt = VT_BYREF | VT_VARIANT, .pvarVal = &v_ };
+
+    /* rgvarg is reversed: last formal is first in array */
+    VARIANT args[2] = { av, ak };
+    DISPPARAMS dp = { .cArgs = 2, .cNamedArgs = 0, .rgvarg = args };
+    VARIANT r = { .vt = VT_EMPTY };
+    HRESULT hr = en->lpVtbl->Invoke(en, 0, g_IID_NULL, 0, DISPATCH_METHOD,
+                                     &dp, &r, NULL, NULL);
+    if (hr != S_OK) return 0;
+    if (!(r.vt == VT_I4 && r.intVal != 0) &&
+        !(r.vt == VT_I8 && r.llVal != 0) &&
+        !(r.vt == VT_BOOL && r.boolVal != 0)) return 0;
+    *pk = k_;
+    *pv = v_;
+    return 1;
 }
 
 /* Convert a UTF-8 buffer (possibly non-null-terminated) to a fresh BSTR. */
