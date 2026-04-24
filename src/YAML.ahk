@@ -94,7 +94,7 @@ class YAML {
      */
     static _LoadLib() => _YAMLMCode()
 
-    static ParseFile(path, options?) => this.Load(FileRead(path, options?))
+    static ParseFile(path, options?) => this.Parse(FileRead(path, options?))
     static DumpFile(val, path, pretty := 0, encoding?)
         => FileOpen(path, "w", encoding?).Write(this.Dump(val, pretty))
 
@@ -112,7 +112,7 @@ class YAML {
         r := this.lib.loads(utf8, n, out)
         if r {
             if r == -2
-                throw YAMLMultiDocError("YAML stream contains multiple documents; use YAML.LoadAll")
+                throw YAMLMultiDocError("YAML stream contains multiple documents; use YAML.ParseAll")
             msg := StrGet(this.lib.get_err_message(), "UTF-8")
             throw YAMLParseError(msg, A_ThisFunc, this.lib.g_err_line, this.lib.g_err_column)
         }
