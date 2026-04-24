@@ -1,0 +1,11 @@
+{
+    "configurations": [
+        {
+            "name": "MCL",
+            "includePath": [
+                "c:/Users/taorc/Documents/AutoHotkey/Lib/YAML/**"
+            ]
+        }
+    ],
+    "version": 4
+}
