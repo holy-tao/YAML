@@ -29,7 +29,7 @@ class YAMLMultiDocError extends YAMLError {
  * Provides read and dump functionality for YAML files, powered by {@link https://pyyaml.org/wiki/LibYAML LibYAML}.
  */
 class YAML {
-    static version := "0.1.0-dev"
+    static version := "0.1.0"
 
     /**
      * When true (default), null values in the YAML decode as ''.
