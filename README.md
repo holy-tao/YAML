@@ -11,7 +11,7 @@ A YAML 1.1 loader and emitter for AutoHotkey v2, powered by [libyaml](https://py
 
 ## Install
 
-Grab a copy of `YAML.ahk` off the Releases page, drop it into your project or a [library folder], and include it:
+Grab a copy of `YAML.ahk` off the [Releases] page, drop it into your project or a [library folder], and include it:
 
 ```ahk
 #Requires AutoHotkey v2.0
@@ -21,6 +21,7 @@ Grab a copy of `YAML.ahk` off the Releases page, drop it into your project or a 
 The single file includes both 32-bit and 64-bit machine-code blobs and selects the right one at load time.
 
 [library folder]: https://www.autohotkey.com/docs/v2/Scripts.htm#lib
+[Releases]: https://github.com/holy-tao/YAML/releases/latest
 
 ## Quick start
 
@@ -75,6 +76,8 @@ For the most part, YAML primitives map cleanly to AutoHotkey primitives and vice
 | `null` / `~` / empty | `''` (or `YAML.Null`) |
 
 [Anchors and aliases] (`&name` / `*name`) are resolved to shared references - mutating through one alias is visible through the others. Recursive anchors produce self-referential containers. When dumping, `YAML` will detect references to objects in the graph and dump them as anchors, preserving the graph. This behavior is not currently configurable.
+
+When dumping objects, empty strings and the integers `1` and `0` have no special meaning, they're dumped as strings and numbers. If you want explicit YAML `null` or boolean values, you must use the sentinels described below.
 
 [anchors and aliases]: https://yaml.org/spec/1.2.2/#3222-anchors-and-aliases
 
