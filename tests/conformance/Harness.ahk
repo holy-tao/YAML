@@ -31,15 +31,36 @@ class ConformanceHarness {
             if !RegExMatch(name, "^[0-9A-Z]{4}$")
                 continue
             out.Push({
-                id:       name,
-                dir:      A_LoopFileFullPath,
-                hasError: FileExist(A_LoopFileFullPath "\error") != "",
-                hasJson:  FileExist(A_LoopFileFullPath "\in.json") != "",
-                hasYaml:  FileExist(A_LoopFileFullPath "\in.yaml") != "",
-                label:    FileExist(A_LoopFileFullPath "\===") ? Trim(FileRead(A_LoopFileFullPath "\===", "UTF-8"), " `t`r`n") : ""
+                id:        name,
+                dir:       A_LoopFileFullPath,
+                hasError:  FileExist(A_LoopFileFullPath "\error") != "",
+                hasJson:   FileExist(A_LoopFileFullPath "\in.json") != "",
+                hasYaml:   FileExist(A_LoopFileFullPath "\in.yaml") != "",
+                label:     FileExist(A_LoopFileFullPath "\===") ? Trim(FileRead(A_LoopFileFullPath "\===", "UTF-8"), " `t`r`n") : "",
+                multiDoc:  this._IsMultiDoc(A_LoopFileFullPath)
             })
         }
         return out
+    }
+
+    /**
+     * The yaml-test-suite has no explicit multi-doc flag, but `test.event`
+     * (the canonical libyaml event stream) lists every document as a `+DOC`
+     * line. Two or more means the fixture is a multi-document stream and
+     * needs ParseAll / DumpAll.
+     */
+    _IsMultiDoc(dir) {
+        path := dir "\test.event"
+        if !FileExist(path)
+            return false
+        count := 0
+        Loop Read, path {
+            if SubStr(A_LoopReadLine, 1, 4) == "+DOC"
+                count++
+            if count > 1
+                return true
+        }
+        return false
     }
 
     _RunOne(t) {
@@ -56,7 +77,7 @@ class ConformanceHarness {
         parseErrDesc := ""
 
         try {
-            parsed := YAML.Parse(yamlText)
+            parsed := t.multiDoc ? YAML.ParseAll(yamlText) : YAML.Parse(yamlText)
             parseOk := true
         } catch YAMLError as e {
             parseThrew := true
@@ -81,7 +102,8 @@ class ConformanceHarness {
             expected := unset
             jsonOk := false
             try {
-                expected := JsonAdapter.Load(FileRead(t.dir "\in.json", "UTF-8"))
+                jsonText := FileRead(t.dir "\in.json", "UTF-8")
+                expected := t.multiDoc ? JsonAdapter.LoadAll(jsonText) : JsonAdapter.Load(jsonText)
                 jsonOk := true
             } catch as e {
                 this._Record("parse", t, false, "in.json load failed: " e.Message)
@@ -105,8 +127,8 @@ class ConformanceHarness {
 
     _RunRoundTrip(t, parsed) {
         try {
-            dumped := YAML.Dump(parsed)
-            reparsed := YAML.Parse(dumped)
+            dumped := t.multiDoc ? YAML.DumpAll(parsed) : YAML.Dump(parsed)
+            reparsed := t.multiDoc ? YAML.ParseAll(dumped) : YAML.Parse(dumped)
             match := TreeCompare.Equal(parsed, reparsed)
             this._Record("round-trip", t, match, match ? "" : "reparsed tree mismatch")
         } catch as e {
@@ -116,8 +138,8 @@ class ConformanceHarness {
 
     _RunDumpFromJson(t, tree) {
         try {
-            dumped := YAML.Dump(tree)
-            reparsed := YAML.Parse(dumped)
+            dumped := t.multiDoc ? YAML.DumpAll(tree) : YAML.Dump(tree)
+            reparsed := t.multiDoc ? YAML.ParseAll(dumped) : YAML.Parse(dumped)
             match := TreeCompare.Equal(tree, reparsed)
             this._Record("dump-json", t, match, match ? "" : "reparsed tree mismatch")
         } catch as e {
