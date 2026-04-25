@@ -398,6 +398,21 @@ static int emit_value(yaml_emitter_t *em, ref_table_t *t, VARIANT *v)
 #pragma endregion
 #pragma region Entry Point
 
+/**
+ * Emit a single document: DOCUMENT_START, the value, DOCUMENT_END.
+ * The caller owns the surrounding STREAM_START/END pair and the ref_table.
+ */
+static int emit_one_doc(yaml_emitter_t *em, ref_table_t *rt, VARIANT *value)
+{
+    yaml_event_t ev;
+    if (!yaml_document_start_event_initialize(&ev, NULL, NULL, NULL, 1) ||
+        !yaml_emitter_emit(em, &ev)) return -1;
+    if (emit_value(em, rt, value) != 0) return -1;
+    if (!yaml_document_end_event_initialize(&ev, 1) ||
+        !yaml_emitter_emit(em, &ev)) return -1;
+    return 0;
+}
+
 MCL_EXPORT(dumps, Ptr, pIn, Int, bPretty, Ptr, ppOut, Ptr, pOutSize, CDecl_Int);
 int dumps(VARIANT *pIn, int bPretty, unsigned char **ppOut, int64_t *pOutSize)
 {
@@ -431,13 +446,7 @@ int dumps(VARIANT *pIn, int bPretty, unsigned char **ppOut, int64_t *pOutSize)
     if (!yaml_stream_start_event_initialize(&ev, YAML_UTF8_ENCODING) ||
         !yaml_emitter_emit(&em, &ev)) { rc = -1; goto done; }
 
-    if (!yaml_document_start_event_initialize(&ev, NULL, NULL, NULL, 1) ||
-        !yaml_emitter_emit(&em, &ev)) { rc = -1; goto done; }
-
-    if (emit_value(&em, &rt, pIn) != 0) { rc = -1; goto done; }
-
-    if (!yaml_document_end_event_initialize(&ev, 1) ||
-        !yaml_emitter_emit(&em, &ev)) { rc = -1; goto done; }
+    if (emit_one_doc(&em, &rt, pIn) != 0) { rc = -1; goto done; }
 
     if (!yaml_stream_end_event_initialize(&ev) ||
         !yaml_emitter_emit(&em, &ev)) { rc = -1; goto done; }
@@ -448,6 +457,87 @@ done:
     }
     yaml_emitter_delete(&em);
     reftab_free(&rt);
+
+    if (rc == 0) {
+        *ppOut = ob.data;
+        *pOutSize = (int64_t)ob.size;
+    } else {
+        if (ob.data) free(ob.data);
+    }
+    return rc;
+}
+
+MCL_EXPORT(dumps_all, Ptr, pIn, Int, bPretty, Ptr, ppOut, Ptr, pOutSize, CDecl_Int);
+int dumps_all(VARIANT *pIn, int bPretty, unsigned char **ppOut, int64_t *pOutSize)
+{
+    clear_err();
+    *ppOut = NULL;
+    *pOutSize = 0;
+
+    if (pIn->vt != VT_DISPATCH || !pIn->pdispVal ||
+        !call_has_method(pIn->pdispVal, s_bstrPush.szData)) {
+        set_err("DumpAll input must be an Array of documents", NULL, 0, 0);
+        return -1;
+    }
+
+    outbuf_t ob = { .data = NULL, .size = 0, .capacity = 0, .oom = 0 };
+
+    yaml_emitter_t em;
+    if (!yaml_emitter_initialize(&em)) {
+        set_err("Emitter init failed", NULL, 0, 0);
+        return -1;
+    }
+    yaml_emitter_set_output(&em, outbuf_write_handler, &ob);
+    yaml_emitter_set_unicode(&em, 1);
+    yaml_emitter_set_width(&em, bPretty ? 80 : -1);
+    yaml_emitter_set_indent(&em, 2);
+
+    int rc = 0;
+    yaml_event_t ev;
+
+    if (!yaml_stream_start_event_initialize(&ev, YAML_UTF8_ENCODING) ||
+        !yaml_emitter_emit(&em, &ev)) { rc = -1; goto done; }
+
+    /* Walk the input Array via __Enum(2). Each iteration yields (index, value);
+     * the value is the per-document tree. Anchors are document-local, so each
+     * document gets a fresh ref_table. */
+    {
+        VARIANT en;
+        if (get_enum2(pIn->pdispVal, &en) != 0) {
+            set_err("Failed to enumerate document Array", NULL, 0, 0);
+            rc = -1; goto done;
+        }
+        for (;;) {
+            VARIANT idx, doc;
+            if (!enum_next(en.pdispVal, &idx, &doc)) break;
+
+            ref_table_t rt = { NULL, 0, 0, 0 };
+            if (count_value(&rt, &doc) != 0) {
+                set_err("Reference table overflow", NULL, 0, 0);
+                reftab_free(&rt);
+                variant_release(&idx);
+                variant_release(&doc);
+                rc = -1;
+                break;
+            }
+            int doc_rc = emit_one_doc(&em, &rt, &doc);
+            reftab_free(&rt);
+            variant_release(&idx);
+            variant_release(&doc);
+            if (doc_rc != 0) { rc = -1; break; }
+        }
+        en.pdispVal->lpVtbl->Release(en.pdispVal);
+        if (rc != 0) goto done;
+    }
+
+    if (!yaml_stream_end_event_initialize(&ev) ||
+        !yaml_emitter_emit(&em, &ev)) { rc = -1; goto done; }
+
+done:
+    if (rc != 0 && g_err_message[0] == 0) {
+        set_err(em.problem ? em.problem : "Unknown emitter error", NULL, 0, 0);
+    }
+    yaml_emitter_delete(&em);
 
     if (rc == 0) {
         *ppOut = ob.data;

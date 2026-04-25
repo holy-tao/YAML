@@ -411,39 +411,45 @@ static void registry_free(anchor_registry_t *r)
 #pragma endregion
 #pragma region Parse Loop
 
-MCL_EXPORT(loads, Ptr, utf8, Int64, len, Ptr, pOut, CDecl_Int);
-int loads(const char *utf8, int64_t len, VARIANT *pOut)
+/**
+ * Parse events from `parser` until the next DOCUMENT_END or STREAM_END.
+ *
+ * The frame stack and anchor registry are document-local: anchors do not
+ * carry across document boundaries (YAML 1.1 Â§3.2.2.2), so the registry
+ * lives in this function.
+ *
+ * Out-params:
+ *   doc_root        - filled with the document's value (only valid if *have_doc_root)
+ *   have_doc_root   - 1 if a content event populated doc_root
+ *   saw_doc_end     - 1 if a DOCUMENT_END_EVENT was consumed
+ *   saw_stream_end  - 1 if a STREAM_END_EVENT was consumed (no more docs)
+ *
+ * Returns 0 on success, -1 on parse error. On error, partial state is
+ * cleaned up internally and *have_doc_root is left as 0.
+ */
+static int parse_one_doc(yaml_parser_t *parser,
+                         VARIANT *doc_root, int *have_doc_root,
+                         int *saw_doc_end, int *saw_stream_end)
 {
-    clear_err();
-    pOut->vt = VT_EMPTY;
-
-    yaml_parser_t parser;
-    if (!yaml_parser_initialize(&parser)) {
-        set_err("Parser init failed", NULL, 0, 0);
-        return -1;
-    }
-    yaml_parser_set_input_string(&parser, (const unsigned char *)utf8, (size_t)len);
+    *have_doc_root = 0;
+    *saw_doc_end = 0;
+    *saw_stream_end = 0;
+    doc_root->vt = VT_EMPTY;
 
     // TODO move stack to heap and remove -mno-stack-arg-probe from compiler flags for safety
     frame_t stack[MAX_DEPTH];
     int depth = 0;
 
     anchor_registry_t registry = { NULL, 0, 0 };
-
-    int doc_count = 0;
-    VARIANT doc_root;
-    doc_root.vt = VT_EMPTY;
-    int have_doc_root = 0;
-
     int rc = 0;
 
     for (;;) {
         yaml_event_t ev;
-        if (!yaml_parser_parse(&parser, &ev)) {
-            set_err(parser.problem ? parser.problem : "Unknown parse error", 
+        if (!yaml_parser_parse(parser, &ev)) {
+            set_err(parser->problem ? parser->problem : "Unknown parse error",
                     NULL,
-                    (int)parser.problem_mark.line + 1,
-                    (int)parser.problem_mark.column + 1);
+                    (int)parser->problem_mark.line + 1,
+                    (int)parser->problem_mark.column + 1);
             rc = -1;
             break;
         }
@@ -458,15 +464,12 @@ int loads(const char *utf8, int64_t len, VARIANT *pOut)
             break;
 
         case YAML_DOCUMENT_END_EVENT:
-            doc_count++;
-            if (doc_count > 1) {
-                set_err("Multiple documents in stream (use ParseAll)", NULL, 0, 0);
-                rc = -2;
-                done = 1;
-            }
+            *saw_doc_end = 1;
+            done = 1;
             break;
 
         case YAML_STREAM_END_EVENT:
+            *saw_stream_end = 1;
             done = 1;
             break;
 
@@ -480,8 +483,8 @@ int loads(const char *utf8, int64_t len, VARIANT *pOut)
                 rc = -1; done = 1; break;
             }
             if (depth == 0) {
-                doc_root = v;
-                have_doc_root = 1;
+                *doc_root = v;
+                *have_doc_root = 1;
             } else {
                 if (assign_to_top(&stack[depth - 1], &v) != 0) { rc = -1; done = 1; }
             }
@@ -499,8 +502,8 @@ int loads(const char *utf8, int64_t len, VARIANT *pOut)
                 }
             }
             if (depth == 0) {
-                doc_root = v;
-                have_doc_root = 1;
+                *doc_root = v;
+                *have_doc_root = 1;
             } else {
                 if (assign_to_top(&stack[depth - 1], &v) != 0) { rc = -1; done = 1; }
             }
@@ -546,8 +549,8 @@ int loads(const char *utf8, int64_t len, VARIANT *pOut)
             VARIANT v;
             variant_set_dispatch(&v, stack[depth].obj);
             if (depth == 0) {
-                doc_root = v;
-                have_doc_root = 1;
+                *doc_root = v;
+                *have_doc_root = 1;
             } else {
                 if (assign_to_top(&stack[depth - 1], &v) != 0) { rc = -1; done = 1; }
             }
@@ -562,8 +565,71 @@ int loads(const char *utf8, int64_t len, VARIANT *pOut)
         if (done) break;
     }
 
-    yaml_parser_delete(&parser);
     registry_free(&registry);
+
+    if (rc != 0) {
+        for (int i = 0; i < depth; i++) {
+            if (stack[i].pending_key) SysFreeString(stack[i].pending_key);
+            if (stack[i].obj) stack[i].obj->lpVtbl->Release(stack[i].obj);
+        }
+        if (*have_doc_root) {
+            variant_release(doc_root);
+            *have_doc_root = 0;
+        }
+    }
+
+    return rc;
+}
+
+/* Initialize a yaml_parser_t with a string and a length. Returns NULL on failure. */
+int parser_init(const char* utf8, size_t len, yaml_parser_t* parser) {
+    if (!yaml_parser_initialize(parser)) {
+        set_err("Parser init failed", NULL, 0, 0);
+        return 0;
+    }
+    yaml_parser_set_input_string(parser, (const unsigned char *)utf8, (size_t)len);
+    return 1;
+}
+
+MCL_EXPORT(loads, Ptr, utf8, Int64, len, Ptr, pOut, CDecl_Int);
+int loads(const char *utf8, int64_t len, VARIANT *pOut)
+{
+    clear_err();
+    pOut->vt = VT_EMPTY;
+
+    yaml_parser_t parser;
+    if (parser_init(utf8, len, &parser) == 0) { return -1; }
+
+    VARIANT doc_root;
+    int have_doc_root = 0;
+    int saw_doc_end = 0;
+    int saw_stream_end = 0;
+    int rc = parse_one_doc(&parser, &doc_root, &have_doc_root,
+                           &saw_doc_end, &saw_stream_end);
+
+    /* If the first call ended on DOCUMENT_END (not STREAM_END), there may
+     * be a second document. Drain one more to detect multi-doc streams. 
+     */
+    if (rc == 0 && saw_doc_end && !saw_stream_end) {
+        VARIANT doc2;
+        int have2 = 0, saw_doc_end2 = 0, saw_stream_end2 = 0;
+        int rc2 = parse_one_doc(&parser, &doc2, &have2,
+                                &saw_doc_end2, &saw_stream_end2);
+        if (rc2 != 0) {
+            if (have_doc_root) variant_release(&doc_root);
+            have_doc_root = 0;
+            rc = rc2;
+        } else if (saw_doc_end2) {
+            set_err("Multiple documents in stream (use ParseAll)", NULL, 0, 0);
+            if (have2) variant_release(&doc2);
+            if (have_doc_root) variant_release(&doc_root);
+            have_doc_root = 0;
+            rc = -2;
+        }
+        /* else: parser hit STREAM_END without another doc - single doc. */
+    }
+
+    yaml_parser_delete(&parser);
 
     if (rc == 0) {
         if (have_doc_root) {
@@ -572,19 +638,69 @@ int loads(const char *utf8, int64_t len, VARIANT *pOut)
             /* Empty stream -> empty string, matches Null-ish behavior. */
             variant_set_empty_string(pOut);
         }
-    } else {
-        /* Clean up any partially-built structures. */
-        for (int i = 0; i < depth; i++) {
-            if (stack[i].pending_key) SysFreeString(stack[i].pending_key);
-            if (stack[i].obj) stack[i].obj->lpVtbl->Release(stack[i].obj);
-        }
-        if (have_doc_root && doc_root.vt == VT_DISPATCH && doc_root.pdispVal) {
-            doc_root.pdispVal->lpVtbl->Release(doc_root.pdispVal);
-        } else if (have_doc_root && doc_root.vt == VT_BSTR && doc_root.bstrVal) {
-            SysFreeString(doc_root.bstrVal);
-        }
     }
 
+    return rc;
+}
+
+MCL_EXPORT(loads_all, Ptr, utf8, Int64, len, Ptr, pOut, CDecl_Int);
+int loads_all(const char *utf8, int64_t len, VARIANT *pOut)
+{
+    clear_err();
+    pOut->vt = VT_EMPTY;
+
+    yaml_parser_t parser;
+    if (parser_init(utf8, len, &parser) == 0) { return -1; }
+
+    IDispatch *result = ahk_new_array();
+    if (!result) {
+        set_err("Failed to construct Array", NULL, 0, 0);
+        yaml_parser_delete(&parser);
+        return -1;
+    }
+
+    int rc = 0;
+    for (;;) {
+        VARIANT doc_root;
+        int have_doc_root = 0;
+        int saw_doc_end = 0;
+        int saw_stream_end = 0;
+        rc = parse_one_doc(&parser, &doc_root, &have_doc_root,
+                           &saw_doc_end, &saw_stream_end);
+        if (rc != 0) break;
+
+        if (saw_doc_end) {
+            VARIANT v;
+            if (have_doc_root) {
+                v = doc_root;
+            } else {
+                /* Document with no content events - emit empty string,
+                 * matching loads's empty-stream fallback. */
+                variant_set_empty_string(&v);
+            }
+            HRESULT hr = ahk_array_push(result, &v);
+            if (v.vt == VT_DISPATCH && v.pdispVal) {
+                v.pdispVal->lpVtbl->Release(v.pdispVal);
+            } else if (v.vt == VT_BSTR && v.bstrVal) {
+                SysFreeString(v.bstrVal);
+            }
+            if (hr != S_OK) {
+                set_err("Array.Push failed", NULL, 0, 0);
+                rc = -1;
+                break;
+            }
+        }
+
+        if (saw_stream_end) break;
+    }
+
+    yaml_parser_delete(&parser);
+
+    if (rc == 0) {
+        variant_set_dispatch(pOut, result);
+    } else {
+        result->lpVtbl->Release(result);
+    }
     return rc;
 }
 

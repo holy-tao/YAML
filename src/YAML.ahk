@@ -128,9 +128,7 @@ class YAML {
         if r {
             if r == -2
                 throw YAMLMultiDocError("YAML stream contains multiple documents; use YAML.ParseAll")
-            msg := StrGet(this.lib.get_err_message(), "UTF-8")
-            extra := StrGet(this.lib.get_err_extra(), "UTF-8")
-            throw YAMLParseError(msg, A_ThisFunc, extra, this.lib.g_err_line, this.lib.g_err_column)
+            this._ThrowYamlParseError()
         }
 
         result := ComValue(0x400C, out.Ptr)[]
@@ -140,13 +138,35 @@ class YAML {
     }
 
     /**
-     * Parse a YAML string containing multiple documents into an array of AHK
-     * values.
+     * Parse a YAML string containing one or more documents into an Array of
+     * AHK values. Always returns an Array (length 0 for an empty stream,
+     * length 1 for a single-document stream).
+     *
+     * Anchors and aliases are resolved per-document; an anchor defined in
+     * one document is not visible to subsequent documents.
+     *
      * @param {String} yaml the yaml to parse
      * @returns {Array<Map | Array | Primitive>} the parsed value(s)
      */
-    static LoadAll(yaml) {
-        throw MethodError("Not implemented")
+    static ParseAll(yaml) {
+        utf8 := Buffer(StrPut(yaml, "UTF-8"), 0)
+        n := StrPut(yaml, utf8, "UTF-8") - 1
+
+        out := Buffer(24, 0)
+        if this.lib.loads_all(utf8, n, out)
+            this._ThrowYamlParseError()
+
+        result := ComValue(0x400C, out.Ptr)[]
+        if IsObject(result)
+            ObjRelease(ObjPtr(result))
+        return result
+    }
+
+    static _ThrowYamlParseError() {
+        msg := StrGet(this.lib.get_err_message(), "UTF-8")
+        extra := StrGet(this.lib.get_err_extra(), "UTF-8")
+
+        throw YAMLParseError(msg, A_ThisFunc, extra, this.lib.g_err_line, this.lib.g_err_column)
     }
 
     /**
@@ -166,6 +186,41 @@ class YAML {
         pOutSize := Buffer(8, 0)
 
         r := this.lib.dumps(varbuf, !!pretty, pOutPtr, pOutSize)
+
+        vref[] := 0
+
+        if r {
+            msg := StrGet(this.lib.get_err_message(), "UTF-8")
+            extra := StrGet(this.lib.get_err_extra(), "UTF-8")
+
+            throw YAMLError("YAML dump failed: " msg, A_ThisFunc, extra)
+        }
+
+        bufPtr := NumGet(pOutPtr, "Ptr")
+        bufSize := NumGet(pOutSize, "Int64")
+        out := StrGet(bufPtr, bufSize, "UTF-8")
+        this.lib.dump_free(bufPtr)
+        return out
+    }
+
+    /**
+     * Serialize an Array of AHK values to a multi-document YAML stream.
+     * Each element of `docs` becomes one YAML document, separated by `---`.
+     *
+     * @param {Array} docs Array of values to emit (one document per element)
+     */
+    static DumpAll(docs, pretty := 0) {
+        if !(docs is Array)
+            throw TypeError("Expected an Array but got a(n) " Type(docs), , docs)
+
+        varbuf := Buffer(24, 0)
+        vref := ComValue(0x400C, varbuf.Ptr)
+        vref[] := docs
+
+        pOutPtr := Buffer(A_PtrSize, 0)
+        pOutSize := Buffer(8, 0)
+
+        r := this.lib.dumps_all(varbuf, !!pretty, pOutPtr, pOutSize)
 
         vref[] := 0
 
