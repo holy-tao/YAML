@@ -72,6 +72,36 @@ class YAML {
     }
 
     /**
+     * When true (default), an unresolved custom tag on parse - unknown class,
+     * missing static FromYAML, or FromYAML throwing - raises YAMLParseError
+     * with the offending tag in the .Extra field. When false, the tag is
+     * silently dropped and the underlying Map / Array / scalar is returned.
+     *
+     * Standard `tag:yaml.org,2002:*` tags (`!!str`, `!!int`, etc.) are always
+     * honored; this flag only governs the custom-class protocol below.
+     */
+    static StrictTags {
+        get => this.lib.bStrictTags
+        set => this.lib.bStrictTags := value
+    }
+
+    /**
+     * URI prefix for tags emitted/recognized as custom AHK class instances.
+     * The class's dotted name is appended (e.g. "MyClass" or "Outer.Inner").
+     *
+     * Format follows RFC 4151: `tag:<authority>,<date>:<specific>`.
+     */
+    static TagPrefix => "tag:github.com,2026:holy-tao/yaml/ahk/object/"
+
+    /**
+     * Get the tag string for an object.
+     * 
+     * @param {Object} obj the object to get the tag for 
+     * @returns {String} the tag.
+     */
+    static TagFor(obj) => Format("{1}{2}", this.TagPrefix, obj.__Class)
+
+    /**
      * Sentinel for YAML null. Returned from Parse when NullsAsStrings=false.
      */
     static Null {
@@ -109,6 +139,12 @@ class YAML {
         this.lib.objNull    := ObjPtr(this.Null)
         this.lib.objTrue    := ObjPtr(this.True)
         this.lib.objFalse   := ObjPtr(this.False)
+
+        ; Persistent cdecl callbacks for the C side to invoke when parsing
+        ; custom tags or dumping classes that implement ToYAML. "F" runs in
+        ; the current thread (the DllCall is already synchronous).
+        this.lib.pObjFromYAML := CallbackCreate(this._ObjFromYAML.Bind(this), "C F", 3)
+        this.lib.pObjToYAML   := CallbackCreate(this._ObjToYAML.Bind(this),   "C F", 3)
     }
 
     /**
@@ -190,6 +226,118 @@ class YAML {
         if IsObject(result)
             ObjRelease(ObjPtr(result))
         return result
+    }
+
+    /**
+     * Internal: invoked from C (parse path) when a non-standard tag is seen
+     * on a scalar/map/sequence. Resolves the tag to an AHK class and calls
+     * its static FromYAML.
+     * 
+     * @param {Integer} pTag pointer to a UTF-8 string containing the tag
+     * @param {Integer} pIn pointer to the input value
+     * @param {Integer} pOut output pointer in which to store the output VARIANT
+     * @returns {Integer} Value indicating success or failure:
+     *   0 - handled, *pOut populated with the FromYAML result
+     *   1 - unhandled (foreign prefix, or non-strict failure); C continues to parse
+     *   2 - strict-mode failure; err globals already populated
+     */
+    static _ObjFromYAML(pTag, pIn, pOut) {
+        static OK := 0, EUNHANDLED := 1, ESTRICT := 2
+
+        try {
+            tag := StrGet(pTag, "UTF-8")
+
+            prefixLen := StrLen(this.TagPrefix)
+            if (StrLen(tag) <= prefixLen || SubStr(tag, 1, prefixLen) != this.TagPrefix)
+                return EUNHANDLED
+
+            dottedName := SubStr(tag, prefixLen + 1)
+
+            cls := ""
+            try {
+                for part in StrSplit(dottedName, ".")
+                    cls := cls is Class ? cls.%part% : %part%
+            }
+            catch Error as err {
+                this._SetCallbackErr(Format("Could not resolve '{1}' to a class: {2}", dottedName, err.Message), tag)
+                return this.lib.bStrictTags? ESTRICT : EUNHANDLED
+            }
+
+            if !(cls is Class) {
+                this._SetCallbackErr(Format("'{1}' is not a Class", dottedName), tag)
+                return this.lib.bStrictTags? ESTRICT : EUNHANDLED
+            }
+            else if !HasMethod(cls, "FromYAML", 1) {
+                this._SetCallbackErr(Format("Class '{1}' has no compatible 'FromYAML' method", dottedName), tag)
+                return this.lib.bStrictTags? ESTRICT : EUNHANDLED
+            }
+
+            ; Note unlike _ObjToYAML this is a borrow, the C lib owns the VARIANT and any IDispatch
+            ; pointers it may hold.
+            inValue := ComValue(0x400C, pIn)[]
+
+            try {
+                result := cls.FromYAML(inValue)
+            }
+            catch Error as err {
+                this._SetCallbackErr(Format("{1}.FromYAML threw a(n) {2}: {3}", 
+                    dottedName, Type(err), err.Message), err.Extra)
+                return ESTRICT
+            }
+
+            ; Marshal result into the output VARIANT. Assignment AddRefs IDispatch
+            ; via VariantCopy; AHK releases its own ref when `result` goes out of
+            ; scope, leaving C with the single ref it expects to own.
+            outRef := ComValue(0x400C, pOut)
+            outRef[] := result
+            return OK
+        }
+        catch Error as err {
+            this._SetCallbackErr(Format("Unhandled {1}: {2}", Type(err), err.Message), err.Extra)
+            return ESTRICT
+        }
+    }
+
+    /**
+     * Internal: invoked from C (dump path) when an object with a `ToYAML`
+     * method is encountered. Calls obj.ToYAML(), writes the resolved tag URI
+     * into the 256-byte buffer at pTagOut, marshals the replacement value
+     * into the VARIANT at pReplOut.
+     *
+     * Returns 0 on success, 1 on failure (err globals populated).
+     */
+    static _ObjToYAML(pObj, pTagOut, pReplOut) {
+        try {
+            obj := ObjFromPtrAddRef(pObj)
+            replacement := obj.ToYAML()
+
+            tag := this.TagFor(obj)
+            ; pTagOut points at a 256-byte char buffer; leave a null terminator.
+            StrPut(tag, pTagOut, 255, "UTF-8")
+
+            outRef := ComValue(0x400C, pReplOut)
+            outRef[] := replacement
+            return 0
+        } 
+        catch Error as err {
+            tag := ""
+            try tag := this.TagFor(obj)
+            this._SetCallbackErr(Format("Unhandled {1}: {2}", Type(err), err.Message), tag)
+            return 1
+        }
+    }
+
+    /**
+     * Internal: write the error message + extra back into the C-side error
+     * globals from a CallbackCreate'd callback. Used on strict-tag failures
+     * so YAMLParseError / YAMLError carry the offending tag in `.Extra`.
+     */
+    static _SetCallbackErr(msg, extra := "") {
+        msgBuf := Buffer(StrPut(msg, "UTF-8"), 0)
+        StrPut(msg, msgBuf, "UTF-8")
+        extraBuf := Buffer(StrPut(extra, "UTF-8"), 0)
+        StrPut(extra, extraBuf, "UTF-8")
+        this.lib.set_err(msgBuf, extraBuf, 0, 0)
     }
 
     static _ThrowYamlParseError() {

@@ -117,12 +117,89 @@ static int try_parse_float(const char *s, size_t n, double *out)
     return 1;
 }
 
-/* Fill `out` from a YAML scalar event, honoring NullsAsStrings / BoolsAsInts. */
+/* "tag:yaml.org,2002:" - libyaml expands the !! shorthand to this URI. */
+#define STD_TAG_PREFIX "tag:yaml.org,2002:"
+#define STD_TAG_PREFIX_LEN 18
+
+static int tag_is_std(const char *tag)
+{
+    if (!tag) return 0;
+    for (int i = 0; i < STD_TAG_PREFIX_LEN; i++) {
+        if (tag[i] != STD_TAG_PREFIX[i]) return 0;
+    }
+    return 1;
+}
+
+/* Fill `out` from a YAML scalar event, honoring NullsAsStrings / BoolsAsInts.
+ * If the event carries an explicit tag:yaml.org,2002:* tag, that forces the
+ * type interpretation (and a coercion failure becomes a parse error). */
 static int emit_scalar(yaml_event_t *ev, VARIANT *out)
 {
     const char *s = (const char *)ev->data.scalar.value;
     size_t n = ev->data.scalar.length;
     yaml_scalar_style_t style = ev->data.scalar.style;
+    const char *tag = (const char *)ev->data.scalar.tag;
+    int line = (int)ev->start_mark.line + 1;
+    int col  = (int)ev->start_mark.column + 1;
+
+    /* Standard YAML 1.1 type tags: force the type, ignore inference. */
+    if (tag_is_std(tag)) {
+        const char *type = tag + STD_TAG_PREFIX_LEN;
+        if (strcmp(type, "str") == 0) {
+            BSTR b = bstr_from_utf8(s, (int)n);
+            if (!b) { set_err("Out of memory", NULL, 0, 0); return -1; }
+            variant_set_bstr(out, b);
+            return 0;
+        }
+        if (strcmp(type, "null") == 0) {
+            if (bNullsAsStrings) {
+                variant_set_empty_string(out);
+            } else {
+                objNull->lpVtbl->AddRef(objNull);
+                variant_set_dispatch(out, objNull);
+            }
+            return 0;
+        }
+        if (strcmp(type, "bool") == 0) {
+            int bv;
+            if (!try_parse_bool(s, n, &bv)) {
+                set_err("Scalar with !!bool tag is not a valid boolean", tag, line, col);
+                return -1;
+            }
+            if (bBoolsAsInts) {
+                variant_set_i64(out, bv ? 1 : 0);
+            } else {
+                IDispatch *p = bv ? objTrue : objFalse;
+                p->lpVtbl->AddRef(p);
+                variant_set_dispatch(out, p);
+            }
+            return 0;
+        }
+        if (strcmp(type, "int") == 0) {
+            int64_t iv;
+            if (!try_parse_int(s, n, &iv)) {
+                set_err("Scalar with !!int tag is not a valid integer", tag, line, col);
+                return -1;
+            }
+            variant_set_i64(out, iv);
+            return 0;
+        }
+        if (strcmp(type, "float") == 0) {
+            double dv;
+            if (try_parse_float(s, n, &dv)) {
+                variant_set_r8(out, dv);
+                return 0;
+            }
+            int64_t iv;
+            if (try_parse_int(s, n, &iv)) {
+                variant_set_r8(out, (double)iv);
+                return 0;
+            }
+            set_err("Scalar with !!float tag is not a valid float", tag, line, col);
+            return -1;
+        }
+        /* Unknown :type under the std prefix - fall through to inference. */
+    }
 
     /* Quoted scalars are always strings. */
     int plain = (style == YAML_PLAIN_SCALAR_STYLE);
@@ -179,7 +256,53 @@ typedef struct {
     IDispatch *obj;
     BSTR pending_key;   /* maps: buffered key awaiting its value */
     int  has_key;
+    char *tag;          /* owned dup of START event tag, or NULL */
+    char *anchor;       /* owned dup of START event anchor, or NULL */
+    int   start_line;   /* for error reporting on END */
+    int   start_col;
 } frame_t;
+
+/* Duplicate a NUL-terminated string with malloc; returns NULL on alloc failure
+ * or for empty/NULL input. */
+static char *dup_cstr(const unsigned char *s)
+{
+    if (!s || !*s) return NULL;
+    size_t n = 0;
+    while (s[n]) n++;
+    char *p = (char *)malloc(n + 1);
+    if (!p) return NULL;
+    memcpy(p, s, n + 1);
+    return p;
+}
+
+/* Dispatch a non-standard tag to the AHK pObjFromYAML callback.
+ * Returns:
+ *    1 - dispatched; *v released and replaced with the callback's result
+ *    0 - not dispatched (NULL/std/unknown-prefix tag, or non-strict failure);
+ *        *v left as-is
+ *   -1 - strict-mode failure; err globals populated. *v left as-is. */
+static int dispatch_custom_tag(const char *tag, VARIANT *v, int line, int col)
+{
+    if (!tag || !*tag || !pObjFromYAML) return 0;
+    if (tag_is_std(tag)) return 0;
+
+    pfn_obj_from_yaml fn = (pfn_obj_from_yaml)pObjFromYAML;
+    VARIANT out = { .vt = VT_EMPTY };
+    int rc = fn(tag, v, &out);
+    if (rc == 0) {
+        *v = out;
+        return 1;
+    }
+    if (rc == 1) {
+        variant_release(&out);
+        return 0;
+    }
+    /* Strict failure - AHK side wrote message/extra. Backfill line/col. */
+    variant_release(&out);
+    if (g_err_line == 0) g_err_line = line;
+    if (g_err_column == 0) g_err_column = col;
+    return -1;
+}
 
 #define MAX_DEPTH 256
 
@@ -424,6 +547,12 @@ static void registry_free(anchor_registry_t *r)
 #pragma endregion
 #pragma region Parse Loop
 
+/* Break out of the parse loop with an error code */
+#define parse_break_err() { rc = -1; done = 1; break; }
+
+/* Break out of the parse loop after setting an error message */
+#define parse_exit_err(msg, extra) { set_err(msg, extra, 0, 0); parse_break_err(); }
+
 /**
  * Parse events from `parser` until the next DOCUMENT_END or STREAM_END.
  *
@@ -457,17 +586,17 @@ static int parse_one_doc(yaml_parser_t *parser,
     int rc = 0;
 
     for (;;) {
+        int done = 0;
+
         yaml_event_t ev;
         if (!yaml_parser_parse(parser, &ev)) {
             set_err(parser->problem ? parser->problem : "Unknown parse error",
                     NULL,
                     (int)parser->problem_mark.line + 1,
                     (int)parser->problem_mark.column + 1);
-            rc = -1;
-            break;
+            parse_break_err();
         }
 
-        int done = 0;
         g_cur_line = (int)ev.start_mark.line + 1;
         g_cur_col  = (int)ev.start_mark.column + 1;
 
@@ -493,7 +622,7 @@ static int parse_one_doc(yaml_parser_t *parser,
                         (char*)ev.data.alias.anchor,
                         (int)ev.start_mark.line + 1,
                         (int)ev.start_mark.column + 1);
-                rc = -1; done = 1; break;
+                parse_break_err();
             }
             if (depth == 0) {
                 *doc_root = v;
@@ -506,12 +635,14 @@ static int parse_one_doc(yaml_parser_t *parser,
 
         case YAML_SCALAR_EVENT: {
             VARIANT v;
-            if (emit_scalar(&ev, &v) != 0) { rc = -1; done = 1; break; }
+            if (emit_scalar(&ev, &v) != 0) { parse_break_err(); }
+            int dt = dispatch_custom_tag((const char *)ev.data.scalar.tag, &v,
+                                          g_cur_line, g_cur_col);
+            if (dt < 0) { parse_break_err(); }
             if (ev.data.scalar.anchor) {
                 if (registry_set(&registry, ev.data.scalar.anchor, &v) != 0) {
-                    set_err("Anchor registration failed", (char*)ev.data.alias.anchor, 0, 0);
                     variant_release(&v);
-                    rc = -1; done = 1; break;
+                    parse_exit_err("Anchor registration failed", (char*)ev.data.alias.anchor);
                 }
             }
             if (depth == 0) {
@@ -526,14 +657,12 @@ static int parse_one_doc(yaml_parser_t *parser,
         case YAML_MAPPING_START_EVENT:
         case YAML_SEQUENCE_START_EVENT: {
             if (depth >= MAX_DEPTH) {
-                set_err("YAML nesting too deep", NULL, 0, 0);
-                rc = -1; done = 1; break;
+                parse_exit_err("YAML nesting too deep", NULL);
             }
             int is_map = (ev.type == YAML_MAPPING_START_EVENT);
             IDispatch *obj = is_map ? ahk_new_map() : ahk_new_array();
             if (!obj) {
-                set_err("Failed to construct Map/Array", NULL, 0, 0);
-                rc = -1; done = 1; break;
+                parse_exit_err("Failed to construct Map/Array", NULL);
             }
             const unsigned char *anchor = is_map
                 ? ev.data.mapping_start.anchor
@@ -543,15 +672,20 @@ static int parse_one_doc(yaml_parser_t *parser,
                 vd.vt = VT_DISPATCH;
                 vd.pdispVal = obj;   /* registry_set AddRefs via dup_variant */
                 if (registry_set(&registry, anchor, &vd) != 0) {
-                    set_err("Anchor registration failed", (char*)anchor, 0, 0);
                     obj->lpVtbl->Release(obj);
-                    rc = -1; done = 1; break;
+                    parse_exit_err("Anchor registration failed", (char*)anchor);
                 }
             }
             stack[depth].kind = is_map ? FRAME_MAP : FRAME_ARRAY;
             stack[depth].obj = obj;
             stack[depth].pending_key = NULL;
             stack[depth].has_key = 0;
+            stack[depth].tag = dup_cstr(is_map
+                ? ev.data.mapping_start.tag
+                : ev.data.sequence_start.tag);
+            stack[depth].anchor = anchor ? dup_cstr(anchor) : NULL;
+            stack[depth].start_line = g_cur_line;
+            stack[depth].start_col  = g_cur_col;
             depth++;
             break;
         }
@@ -561,6 +695,36 @@ static int parse_one_doc(yaml_parser_t *parser,
             depth--;
             VARIANT v;
             variant_set_dispatch(&v, stack[depth].obj);
+
+            int dt = dispatch_custom_tag(stack[depth].tag, &v,
+                                          stack[depth].start_line,
+                                          stack[depth].start_col);
+            if (dt < 0) {
+                variant_release(&v);
+                if (stack[depth].tag) free(stack[depth].tag);
+                if (stack[depth].anchor) free(stack[depth].anchor);
+                stack[depth].tag = NULL;
+                stack[depth].anchor = NULL;
+                parse_break_err();
+            }
+            if (dt == 1 && stack[depth].anchor) {
+                /* Re-register the anchor with the replacement so later aliases
+                 * resolve to the FromYAML result, not the raw container. */
+                if (registry_set(&registry, (const unsigned char *)stack[depth].anchor, &v) != 0) {
+                    set_err("Anchor registration failed", stack[depth].anchor, 0, 0);
+                    variant_release(&v);
+                    if (stack[depth].tag) free(stack[depth].tag);
+                    if (stack[depth].anchor) free(stack[depth].anchor);
+                    stack[depth].tag = NULL;
+                    stack[depth].anchor = NULL;
+                    parse_break_err();
+                }
+            }
+            if (stack[depth].tag) free(stack[depth].tag);
+            if (stack[depth].anchor) free(stack[depth].anchor);
+            stack[depth].tag = NULL;
+            stack[depth].anchor = NULL;
+
             if (depth == 0) {
                 *doc_root = v;
                 *have_doc_root = 1;
@@ -584,6 +748,8 @@ static int parse_one_doc(yaml_parser_t *parser,
         for (int i = 0; i < depth; i++) {
             if (stack[i].pending_key) SysFreeString(stack[i].pending_key);
             if (stack[i].obj) stack[i].obj->lpVtbl->Release(stack[i].obj);
+            if (stack[i].tag) free(stack[i].tag);
+            if (stack[i].anchor) free(stack[i].anchor);
         }
         if (*have_doc_root) {
             variant_release(doc_root);

@@ -35,6 +35,19 @@ static bool bResolveMergeKeys = true;
 MCL_EXPORT_GLOBAL(bResolveMergeKeys, Int);
 static bool bStrictBools = false;
 MCL_EXPORT_GLOBAL(bStrictBools, Int);
+static bool bStrictTags = true;
+MCL_EXPORT_GLOBAL(bStrictTags, Int);
+
+/* AHK-side callback function pointers (CallbackCreate). Registered at load
+ * time alongside fnGetMap / fnGetArray. The function-pointer typedefs match
+ * the cdecl ABI used by CallbackCreate(..., "C F", 3). */
+static void *pObjFromYAML;
+MCL_EXPORT_GLOBAL(pObjFromYAML, Ptr);
+static void *pObjToYAML;
+MCL_EXPORT_GLOBAL(pObjToYAML, Ptr);
+
+typedef int (*pfn_obj_from_yaml)(const char *tag_utf8, VARIANT *in, VARIANT *out);
+typedef int (*pfn_obj_to_yaml)(IDispatch *obj, char *tag_out_256, VARIANT *repl_out);
 
 /* ---------- OleAut32 imports ---------- */
 
@@ -79,6 +92,7 @@ DECLARE_BSTR(static s_bstrSet,       L"Set")
 DECLARE_BSTR(static s_bstrHasMethod, L"HasMethod")
 DECLARE_BSTR(static s_bstrEnum,      L"__Enum")
 DECLARE_BSTR(static s_bstrHas,       L"Has")
+DECLARE_BSTR(static s_bstrToYAML,    L"ToYAML")
 
 /* Construct a fresh AHK Map via fnGetMap(). */
 static IDispatch *ahk_new_map(void)

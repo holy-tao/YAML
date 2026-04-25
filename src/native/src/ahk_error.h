@@ -29,7 +29,8 @@ const char *get_err_extra(void) { return g_err_extra; }
 /**
  * Set the error message, retrieved by AHK.
  */
-static void set_err(const char *msg, const char* extra, int line, int col)
+MCL_EXPORT(set_err, Ptr, msg, Ptr, extra, Int, line, Int, col, CDecl_Int);
+int set_err(const char *msg, const char* extra, int line, int col)
 {
     g_err_line = line;
     g_err_column = col;
@@ -45,6 +46,8 @@ static void set_err(const char *msg, const char* extra, int line, int col)
     else {
         memset(g_err_extra, 0, sizeof(g_err_extra));
     }
+
+    return 0;
 }
 
 /**

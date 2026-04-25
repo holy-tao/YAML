@@ -16,6 +16,7 @@
 #Include ./YAML/Config.test.ahk
 #Include ./YAML/Anchors.test.ahk
 #Include ./YAML/MergeKeys.test.ahk
+#Include ./YAML/Tags.test.ahk
 
 YUnit.Use(YunitResultCounter, YUnitJUnit, YUnitStdOut).Test(
 	ScalarsTest,
@@ -26,6 +27,7 @@ YUnit.Use(YunitResultCounter, YUnitJUnit, YUnitStdOut).Test(
 	ConfigTest,
 	AnchorsTest,
 	MergeKeysTest,
+	TagsTest,
 )
 
 Exit(-YunitResultCounter.failures)

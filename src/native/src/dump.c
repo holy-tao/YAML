@@ -173,6 +173,12 @@ static int count_dispatch(ref_table_t *t, IDispatch *obj)
     }
     if (!reftab_insert(t, obj)) return -1;
 
+    /* ToYAML wins over Push/Set: the user's serialization wraps the children,
+     * so don't walk into wrapper internals here. The replacement value emitted
+     * later in pass 2 is a fresh subtree with its own (un-counted) identity. */
+    if (pObjToYAML && call_has_method(obj, s_bstrToYAML.szData))
+        return 0;
+
     /* Recurse into children only on first visit. */
     if (call_has_method(obj, s_bstrPush.szData))
         return count_enum(t, obj);
@@ -192,21 +198,32 @@ static int count_value(ref_table_t *t, VARIANT *v)
 #pragma region Pass 2
 
 static int emit_value(yaml_emitter_t *em, ref_table_t *t, VARIANT *v);
+static int emit_replacement(yaml_emitter_t *em, ref_table_t *t, VARIANT *v,
+                             const char *anchor, const char *tag);
 
-/** 
- * Emit a scalar with an explicit style choice. Numbers/bools/nulls pass
- * YAML_PLAIN_SCALAR_STYLE directly; strings route through emit_bstr which
- * applies the ambiguity check. 
+/**
+ * Emit a scalar with an explicit style choice plus optional anchor/tag.
+ * Numbers/bools/nulls pass YAML_PLAIN_SCALAR_STYLE; strings route through
+ * emit_bstr which applies the ambiguity check.
  */
-static int emit_scalar_styled(yaml_emitter_t *em, const char *s, size_t n,
-                               yaml_scalar_style_t style)
+static int emit_scalar_full(yaml_emitter_t *em, const char *s, size_t n,
+                             yaml_scalar_style_t style,
+                             const char *anchor, const char *tag)
 {
     yaml_event_t ev;
-    if (!yaml_scalar_event_initialize(&ev, NULL, NULL,
-                                       (yaml_char_t *)s, (int)n, 1, 1, style))
+    int implicit = tag ? 0 : 1;
+    if (!yaml_scalar_event_initialize(&ev,
+            (yaml_char_t *)anchor, (yaml_char_t *)tag,
+            (yaml_char_t *)s, (int)n, implicit, implicit, style))
         return -1;
     if (!yaml_emitter_emit(em, &ev)) return -1;
     return 0;
+}
+
+static int emit_scalar_styled(yaml_emitter_t *em, const char *s, size_t n,
+                               yaml_scalar_style_t style)
+{
+    return emit_scalar_full(em, s, n, style, NULL, NULL);
 }
 
 static int emit_plain(yaml_emitter_t *em, const char *s, size_t n)
@@ -214,7 +231,8 @@ static int emit_plain(yaml_emitter_t *em, const char *s, size_t n)
     return emit_scalar_styled(em, s, n, YAML_PLAIN_SCALAR_STYLE);
 }
 
-static int emit_bstr(yaml_emitter_t *em, BSTR b)
+static int emit_bstr_full(yaml_emitter_t *em, BSTR b,
+                           const char *anchor, const char *tag)
 {
     int wlen = 0;
     if (b) while (b[wlen]) wlen++;
@@ -226,12 +244,19 @@ static int emit_bstr(yaml_emitter_t *em, BSTR b)
     if (need > 0)
         WideCharToMultiByte(CP_UTF8, 0, (const WCHAR *)b, wlen, tmp, need, NULL, NULL);
     tmp[need] = 0;
-    yaml_scalar_style_t style = is_ambiguous_plain(tmp, (size_t)need)
-        ? YAML_DOUBLE_QUOTED_SCALAR_STYLE
-        : YAML_PLAIN_SCALAR_STYLE;
-    int rc = emit_scalar_styled(em, tmp, (size_t)need, style);
+    /* When an explicit tag forces interpretation, plain style is fine - the
+     * tag disambiguates. Otherwise use the existing ambiguity check. */
+    yaml_scalar_style_t style = (tag || !is_ambiguous_plain(tmp, (size_t)need))
+        ? YAML_PLAIN_SCALAR_STYLE
+        : YAML_DOUBLE_QUOTED_SCALAR_STYLE;
+    int rc = emit_scalar_full(em, tmp, (size_t)need, style, anchor, tag);
     free(tmp);
     return rc;
+}
+
+static int emit_bstr(yaml_emitter_t *em, BSTR b)
+{
+    return emit_bstr_full(em, b, NULL, NULL);
 }
 
 static int emit_i64(yaml_emitter_t *em, int64_t n)
@@ -262,11 +287,12 @@ static int emit_r8(yaml_emitter_t *em, double d)
 }
 
 static int emit_map(yaml_emitter_t *em, ref_table_t *t, IDispatch *obj,
-                    const char *anchor)
+                    const char *anchor, const char *tag)
 {
     yaml_event_t ev;
+    int implicit = tag ? 0 : 1;
     if (!yaml_mapping_start_event_initialize(&ev,
-            (yaml_char_t *)anchor, NULL, 1,
+            (yaml_char_t *)anchor, (yaml_char_t *)tag, implicit,
             YAML_BLOCK_MAPPING_STYLE))
         return -1;
     if (!yaml_emitter_emit(em, &ev)) return -1;
@@ -295,11 +321,12 @@ static int emit_map(yaml_emitter_t *em, ref_table_t *t, IDispatch *obj,
 }
 
 static int emit_array(yaml_emitter_t *em, ref_table_t *t, IDispatch *obj,
-                      const char *anchor)
+                      const char *anchor, const char *tag)
 {
     yaml_event_t ev;
+    int implicit = tag ? 0 : 1;
     if (!yaml_sequence_start_event_initialize(&ev,
-            (yaml_char_t *)anchor, NULL, 1,
+            (yaml_char_t *)anchor, (yaml_char_t *)tag, implicit,
             YAML_BLOCK_SEQUENCE_STYLE))
         return -1;
     if (!yaml_emitter_emit(em, &ev)) return -1;
@@ -354,16 +381,95 @@ static int emit_dispatch(yaml_emitter_t *em, ref_table_t *t, IDispatch *obj)
         anchor = anchor_buf;
     }
 
+    /* ToYAML hook: caller-defined classes serialize via a callback that
+     * returns (tag URI, replacement value). The replacement is emitted with
+     * the tag attached, so a round-trip can reconstruct the instance. */
+    if (pObjToYAML && call_has_method(obj, s_bstrToYAML.szData)) {
+        char tag[256];
+        tag[0] = 0;
+        VARIANT repl = { .vt = VT_EMPTY };
+        pfn_obj_to_yaml fn = (pfn_obj_to_yaml)pObjToYAML;
+        int cb = fn(obj, tag, &repl);
+        if (cb != 0) {
+            /* AHK side wrote g_err_message / g_err_extra. */
+            variant_release(&repl);
+            return -1;
+        }
+        int rc = emit_replacement(em, t, &repl, anchor, tag[0] ? tag : NULL);
+        variant_release(&repl);
+        return rc;
+    }
+
     /* Detect Array vs Map via HasMethod. Order matters: Map also has .Set,
      * Array has .Push; Arrays don't have Set, Maps don't have Push. */
     if (call_has_method(obj, s_bstrPush.szData))
-        return emit_array(em, t, obj, anchor);
+        return emit_array(em, t, obj, anchor, NULL);
     if (call_has_method(obj, s_bstrSet.szData))
-        return emit_map(em, t, obj, anchor);
+        return emit_map(em, t, obj, anchor, NULL);
 
     // TODO probe for a __Class property and include its value in the error message
     set_err("Unsupported object type (not Map or Array)", NULL, 0, 0);
     return -1;
+}
+
+/**
+ * Emit a value returned from ToYAML, attaching the supplied tag/anchor to
+ * whatever scalar/sequence/mapping start event represents it. Containers
+ * inside the replacement (children) are emitted untagged unless they too
+ * carry a ToYAML method. */
+static int emit_replacement(yaml_emitter_t *em, ref_table_t *t, VARIANT *v,
+                             const char *anchor, const char *tag)
+{
+    switch (v->vt) {
+    case VT_EMPTY:
+    case VT_NULL:
+        return emit_scalar_full(em, "null", 4, YAML_PLAIN_SCALAR_STYLE, anchor, tag);
+    case VT_BOOL:
+        return v->boolVal
+            ? emit_scalar_full(em, "true", 4, YAML_PLAIN_SCALAR_STYLE, anchor, tag)
+            : emit_scalar_full(em, "false", 5, YAML_PLAIN_SCALAR_STYLE, anchor, tag);
+    case VT_I4: {
+        char buf[32];
+        int len = snprintf(buf, sizeof(buf), "%lld", (long long)v->intVal);
+        return emit_scalar_full(em, buf, (size_t)len, YAML_PLAIN_SCALAR_STYLE, anchor, tag);
+    }
+    case VT_I8: {
+        char buf[32];
+        int len = snprintf(buf, sizeof(buf), "%lld", (long long)variant_get_i64(v));
+        return emit_scalar_full(em, buf, (size_t)len, YAML_PLAIN_SCALAR_STYLE, anchor, tag);
+    }
+    case VT_R4:
+    case VT_R8: {
+        double d = (v->vt == VT_R4) ? (double)v->fltVal : v->dblVal;
+        char buf[64];
+        int len = snprintf(buf, sizeof(buf), "%.17g", d);
+        int is_numeric = 0;
+        for (int i = 0; i < len; i++) {
+            char c = buf[i];
+            if (c == '.' || c == 'e' || c == 'E' || c == 'n' || c == 'i') { is_numeric = 1; break; }
+        }
+        if (!is_numeric && len + 2 < (int)sizeof(buf)) {
+            buf[len++] = '.'; buf[len++] = '0'; buf[len] = 0;
+        }
+        return emit_scalar_full(em, buf, (size_t)len, YAML_PLAIN_SCALAR_STYLE, anchor, tag);
+    }
+    case VT_BSTR:
+        return emit_bstr_full(em, v->bstrVal, anchor, tag);
+    case VT_DISPATCH: {
+        if (!v->pdispVal)
+            return emit_scalar_full(em, "null", 4, YAML_PLAIN_SCALAR_STYLE, anchor, tag);
+        IDispatch *obj = v->pdispVal;
+        if (call_has_method(obj, s_bstrPush.szData))
+            return emit_array(em, t, obj, anchor, tag);
+        if (call_has_method(obj, s_bstrSet.szData))
+            return emit_map(em, t, obj, anchor, tag);
+        set_err("ToYAML returned an object that's not Map or Array", NULL, 0, 0);
+        return -1;
+    }
+    default:
+        set_err("ToYAML returned an unsupported VARIANT type", NULL, 0, 0);
+        return -1;
+    }
 }
 
 static int emit_value(yaml_emitter_t *em, ref_table_t *t, VARIANT *v)

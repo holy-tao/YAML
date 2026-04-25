@@ -5,9 +5,21 @@ A YAML 1.1 loader and emitter for AutoHotkey v2, powered by [libyaml](https://py
 > [!NOTE] 
 > ***This is a Work in Progress***
 > 
-> Core load/dump and multi-document support work; tag handling, non-string map keys, and full [yaml-test-suite] conformance are still in progress.
+> Core load/dump and multi-document support work;  non-string map key and full [yaml-test-suite] conformance are still in progress. You may encounter edge cases that do not parse which should.
 
 [yaml-test-suite]: https://github.com/yaml/yaml-test-suite
+
+<details>
+<summary><b>Table of Contents</b></summary>
+
+- [Install](#install)
+- [Quick start](#quick-start)
+- [API](#api)
+  - [Type Mappings](#type-mappings)
+  - [Options](#options)
+- [License](#license)
+
+</details>
 
 ## Install
 
@@ -81,6 +93,50 @@ When dumping objects, empty strings and the integers `1` and `0` have no special
 
 [anchors and aliases]: https://yaml.org/spec/1.2.2/#3222-anchors-and-aliases
 
+#### Explicit [Tag]s
+
+`YAML.ahk` supports the following [explicit tags], which bypass the data type inference logic. `YAML.ahk` also supports the more verbose tag uri format (`tag:yaml.org,2002:str` and so forth):
+- `!!str`: Indicates a string value
+- `!!int`: Indicates an integer value
+- `!!float`: Indicates a floating-point value
+- `!!bool`: Indicates a boolean value
+- `!!null`: Indicates a null value
+
+Unrecognized tags are ignored.
+
+[explicit tags]: https://medium.com/@sabryelhasanin/understanding-explicit-typing-in-yaml-how-to-indicate-data-types-with-tags-2fc9f8d08fdf
+[tag]: https://yaml.org/spec/1.1/#id861700
+
+#### Serializing Autohotkey Objects
+
+`YAML.ahk` uses a custom tag scheme to serialize and deserialize AutoHotkey objects by class. It uses the [tag] `tag:github.com,2026:holy-tao/yaml/ahk/object/<ClassName>` to serialize and identify such objects, where `ClassName` is the dot-delimited name of the class of the object. For an Autohotkey class to be de/serializable, it must:
+1. Implement a static `FromYAML` method that takes a raw deserialized value (an [`Array`], [`Map`], or [`Primitive`]) and returns some value to include in the final deserialized graph
+2. Implement an instance `ToYAML` method that reterns either an [`Array`], [`Map`], or [`Primitive`] to be serialized.
+
+For example, given the following Point class:
+```autohotkey
+class Point {
+    __New(x, y) {
+        this.x := x
+        this.y := y
+    }
+
+    static FromYAML(m) => Point(m["x"], m["y"])
+    ToYAML() => Map("x", this.x, "y", this.y)
+}
+```
+
+`YAML.Dump` returns a string like this:
+```yaml
+!<tag:github.com,2026:holy-tao/yaml/ahk/object/Point>
+x: 10
+"y": 20 # note the y is quoted to disambiguate from the YAML 1.1 boolean value
+```
+
+[`Map`]: https://www.autohotkey.com/docs/v2/lib/Map.htm
+[`Array`]: https://www.autohotkey.com/docs/v2/lib/Array.htm
+[`Primitive`]: https://www.autohotkey.com/docs/v2/Objects.htm#primitive
+
 ### Options
 
 All flags are static properties on `YAML`:
@@ -91,9 +147,11 @@ All flags are static properties on `YAML`:
 | `YAML.BoolsAsInts` | `true` | When false, booleans decode to `YAML.True` / `YAML.False` sentinels. |
 | `YAML.ResolveMergeKeys` | `true` | When false, the YAML 1.1 [merge key] (`<<`) is kept as a literal key instead of splicing. |
 | `YAML.ImplicitBools` | `true` | When false, only YAML 1.2 booleans (`true`/`false` and case variants) parse as bools; `yes`/`no`/`on`/`off` stay strings. |
+| `YAML.StrictTags` | `true` | When true, `YAML.Parse` throws an error if it encounters an [ahk object tag] which cannot be resolved. When false, these values are deserialized as if they were untagged. |
 
 [merge key]: https://yaml.org/type/merge.html
+[ahk object tag]: #serializing-autohotkey-objects
 
 ## License
 
-MIT. See [`LICENSE`](LICENSE). Vendored [libyaml](src/native/libyaml/License) is also MIT-licensed.
+MIT. See [`LICENSE`](LICENSE). Vendored [libyaml](https://github.com/yaml/libyaml?tab=MIT-1-ov-file) is also MIT-licensed.
