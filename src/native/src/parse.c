@@ -27,18 +27,31 @@ static int is_null_scalar(const char *s, size_t n)
     return 0;
 }
 
+static inline int buf_eq_any(const char *s, size_t n, const char **arr, size_t arr_len) {
+    for (size_t i = 0; i < arr_len; i++) {
+        if (buf_eq(s, n, arr[i]))
+            return 1;
+    }
+    return 0;
+}
+
 static int try_parse_bool(const char *s, size_t n, int *out)
 {
-    static const char *trues[]  = {
-        "true","True","TRUE","yes","Yes","YES","on","On","ON","y","Y"
-    };
-    static const char *falses[] = {
-        "false","False","FALSE","no","No","NO","off","Off","OFF","n","N"
-    };
-    for (size_t i = 0; i < sizeof(trues)/sizeof(*trues); i++)
-        if (buf_eq(s, n, trues[i])) { *out = 1; return 1; }
-    for (size_t i = 0; i < sizeof(falses)/sizeof(*falses); i++)
-        if (buf_eq(s, n, falses[i])) { *out = 0; return 1; }
+    static const char *trues_11[] = {"true","True","TRUE","yes","Yes","YES","on","On","ON","y","Y"};
+    static const char *trues_12[] = {"true","True","TRUE"};
+    static const char *falses_11[] = {"false","False","FALSE","no","No","NO","off","Off","OFF","n","N"};
+    static const char *falses_12[] = {"false","False","FALSE"};
+
+    if(bStrictBools) {
+        // Compare against YAML 1.2 spec
+        if (buf_eq_any(s, n, trues_12, sizeof(trues_12)/sizeof(*trues_12))) { *out = 1; return 1; }
+        if (buf_eq_any(s, n, falses_12, sizeof(falses_12)/sizeof(*falses_12))) { *out = 0; return 1; }
+    } else {
+        // Compare against YAML 1.1 spec
+        if (buf_eq_any(s, n, trues_11, sizeof(trues_11)/sizeof(*trues_11))) { *out = 1; return 1; }
+        if (buf_eq_any(s, n, falses_11, sizeof(falses_11)/sizeof(*falses_11))) { *out = 0; return 1; }
+    }
+    
     return 0;
 }
 

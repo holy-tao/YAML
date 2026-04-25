@@ -29,4 +29,20 @@ class ScalarsTest {
     TestBoolOn()          => Assert.Equals(YAML.Parse("on"), 1)
     TestBoolOff()         => Assert.Equals(YAML.Parse("off"), 0)
     TestBoolTrueCaps()    => Assert.Equals(YAML.Parse("True"), 1)
+
+    TestBoolNoImplicit() {
+        YAML.ImplicitBools := false
+        
+        try {
+            Assert.Equals(YAML.Parse("yes"), "yes")
+            Assert.Equals(YAML.Parse("on"), "on")
+            Assert.Equals(YAML.Parse("off"), "off")
+
+            Assert.Equals(YAML.Parse("true"), 1)
+            Assert.Equals(YAML.Parse("False"), 0)
+        }
+        finally {
+            YAML.ImplicitBools := true
+        }
+    }
 }

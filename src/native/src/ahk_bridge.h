@@ -33,6 +33,8 @@ static bool bBoolsAsInts = true;
 MCL_EXPORT_GLOBAL(bBoolsAsInts, Int);
 static bool bResolveMergeKeys = true;
 MCL_EXPORT_GLOBAL(bResolveMergeKeys, Int);
+static bool bStrictBools = false;
+MCL_EXPORT_GLOBAL(bStrictBools, Int);
 
 /* ---------- OleAut32 imports ---------- */
 

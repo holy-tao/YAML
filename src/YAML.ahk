@@ -60,6 +60,18 @@ class YAML {
     }
 
     /**
+     * When true (default), the parser will use the YAML 1.1 boolean
+     * values, including string-like values like "yes" and "on". When
+     * false, only YAML 1.2 booleans parsed as booleans ("true"/"True"/"TRUE"
+     * and "false"/"False"/"FALSE") - values like "off" are parsed as
+     * strings
+     */
+    static ImplicitBools {
+        get => !this.lib.bStrictBools
+        set => this.lib.bStrictBools := !value
+    }
+
+    /**
      * Sentinel for YAML null. Returned from Parse when NullsAsStrings=false.
      */
     static Null {
