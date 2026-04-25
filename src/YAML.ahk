@@ -104,7 +104,25 @@ class YAML {
      */
     static _LoadLib() => _YAMLMCode()
 
+    /**
+     * Parse the contents of a file into an AHK value. See {@link YAML.Parse `YAML.Parse`}
+     * 
+     * @param {String} path Path to the file to parse 
+     * @param {String} options Any `FileRead` options
+     * @returns {Map | Array | Primitive} the parsed value
+     */
     static ParseFile(path, options?) => this.Parse(FileRead(path, options?))
+
+    /**
+     * Serialize an AHK value into a YAML string and write it to `path`, overwriting it if it exists.
+     * See {@link YAML.Dump `YAML.Dump`}
+     * 
+     * @param {Map | Array | Primitive} val The value to serialize
+     * @param {String} path Path to the file to write the serialized value to
+     * @param {Integer} pretty If true, pretty-print the YAML string
+     * @param {String} encoding File encoding to use (e.g. "UTF-8", "CP0")
+     * @returns {Integer} 
+     */
     static DumpFile(val, path, pretty := 0, encoding?)
         => FileOpen(path, "w", encoding?).Write(this.Dump(val, pretty))
 
@@ -171,11 +189,10 @@ class YAML {
 
     /**
      * Serialize an AHK value to a YAML string.
-     *
-     * Supported types:
-     *   - Primitives: integer, float, string
-     *   - Containers: Map, Array
-     *   - Sentinels: YAML.Null, YAML.True, YAML.False
+     * 
+     * @param {Map | Array | Primitive} val The value to serialize 
+     * @param {Integer} pretty If true, pretty-print the string
+     * @returns {String} the serialized value
      */
     static Dump(val, pretty := 0) {
         varbuf := Buffer(24, 0)
@@ -207,7 +224,9 @@ class YAML {
      * Serialize an Array of AHK values to a multi-document YAML stream.
      * Each element of `docs` becomes one YAML document, separated by `---`.
      *
-     * @param {Array} docs Array of values to emit (one document per element)
+     * @param {Array<Map | Array | Primitive>} docs Array of values to emit (one document per element)
+     * @param {Integer} pretty If true, pretty-print the string
+     * @returns {String} the serialized value
      */
     static DumpAll(docs, pretty := 0) {
         if !(docs is Array)
