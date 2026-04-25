@@ -6,7 +6,7 @@
 #Include ./conformance/Harness.ahk
 
 suiteDir   := A_ScriptDir "\yaml-test-suite"
-reportPath := A_ScriptDir "\conformance\report.txt"
+reportPath := Format("{1}\conformance\report_{2}-{3}-{4}.txt", A_ScriptDir, A_Mon, A_MDay, A_Year)
 
 if !DirExist(suiteDir) {
     FileAppend("yaml-test-suite submodule not initialized at " suiteDir "`r`n"

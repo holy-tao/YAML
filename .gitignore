@@ -2,7 +2,7 @@
 junit.xml
 *.junit.xml
 tests/conformance/report.txt
-tests/conformance/report-*.txt
+tests/conformance/report_*.txt
 
 # Build artifacts should not be committed
 dist/
