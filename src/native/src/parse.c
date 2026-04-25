@@ -1,4 +1,5 @@
 #include "ahk_bridge.h"
+#include "ahk_error.h"
 
 #include <yaml.h>
 #include <stdlib.h>
@@ -8,29 +9,6 @@
 MCL_IMPORT(int64_t, msvcrt, _strtoi64, (const char *, char **, int));
 MCL_IMPORT(double,  msvcrt, strtod,    (const char *, char **));
 
-#pragma region Errors
-// Error info exposed to AHK
-
-static int  g_err_line;    MCL_EXPORT_GLOBAL(g_err_line, Int);
-static int  g_err_column;  MCL_EXPORT_GLOBAL(g_err_column, Int);
-static char g_err_message[256];
-
-MCL_EXPORT(get_err_message, CDecl_Ptr);
-const char *get_err_message(void) { return g_err_message; }
-
-static void set_err(const char *msg, int line, int col)
-{
-    g_err_line = line;
-    g_err_column = col;
-    int i = 0;
-    while (msg[i] && i < (int)sizeof(g_err_message) - 1) {
-        g_err_message[i] = msg[i];
-        i++;
-    }
-    g_err_message[i] = 0;
-}
-
-#pragma endregion
 #pragma region Scalar Resolution
 
 static int buf_eq(const char *s, size_t n, const char *lit)
@@ -174,7 +152,7 @@ static int emit_scalar(yaml_event_t *ev, VARIANT *out)
 
     /* Fallback: string. */
     BSTR b = bstr_from_utf8(s, (int)n);
-    if (!b) { set_err("out of memory", 0, 0); return -1; }
+    if (!b) { set_err("Out of memory", NULL, 0, 0); return -1; }
     variant_set_bstr(out, b);
     return 0;
 }
@@ -213,7 +191,7 @@ static int merge_one(IDispatch *dst, IDispatch *src)
 {
     VARIANT en;
     if (get_enum2(src, &en) != 0) {
-        set_err("Failed to enumerate merge source mapping",
+        set_err("Failed to enumerate merge source mapping", NULL,
                 g_cur_line, g_cur_col);
         return -1;
     }
@@ -224,7 +202,7 @@ static int merge_one(IDispatch *dst, IDispatch *src)
         if (k.vt == VT_BSTR && k.bstrVal) {
             if (!ahk_map_has(dst, k.bstrVal)) {
                 if (ahk_map_set(dst, k.bstrVal, &v) != S_OK) {
-                    set_err("Map set failed", g_cur_line, g_cur_col);
+                    set_err("Map set failed", NULL, g_cur_line, g_cur_col);
                     rc = -1;
                 }
             }
@@ -247,7 +225,7 @@ static int perform_merge(IDispatch *dst, VARIANT *src)
 {
     if (src->vt != VT_DISPATCH || !src->pdispVal) {
         set_err("Merge value must be a mapping or sequence of mappings",
-                g_cur_line, g_cur_col);
+                NULL, g_cur_line, g_cur_col);
         return -1;
     }
     IDispatch *obj = src->pdispVal;
@@ -258,7 +236,7 @@ static int perform_merge(IDispatch *dst, VARIANT *src)
         VARIANT en;
         if (get_enum2(obj, &en) != 0) {
             set_err("Failed to enumerate merge source sequence",
-                    g_cur_line, g_cur_col);
+                    NULL, g_cur_line, g_cur_col);
             return -1;
         }
         int rc = 0;
@@ -268,7 +246,7 @@ static int perform_merge(IDispatch *dst, VARIANT *src)
             if (item.vt != VT_DISPATCH || !item.pdispVal ||
                 !call_has_method(item.pdispVal, s_bstrSet.szData)) {
                 set_err("Merge sequence items must all be mappings",
-                        g_cur_line, g_cur_col);
+                        NULL, g_cur_line, g_cur_col);
                 rc = -1;
             } else if (merge_one(dst, item.pdispVal) != 0) {
                 rc = -1;
@@ -281,7 +259,7 @@ static int perform_merge(IDispatch *dst, VARIANT *src)
         return rc;
     }
     set_err("Merge value must be a mapping or sequence of mappings",
-            g_cur_line, g_cur_col);
+            NULL, g_cur_line, g_cur_col);
     return -1;
 }
 
@@ -293,7 +271,7 @@ static int assign_to_top(frame_t *top, VARIANT *value)
 {
     if (top->kind == FRAME_ARRAY) {
         HRESULT hr = ahk_array_push(top->obj, value);
-        if (hr != S_OK) { set_err("Array.Push failed", 0, 0); return -1; }
+        if (hr != S_OK) { set_err("Array.Push failed", NULL, 0, 0); return -1; }
         /* Release our ref on objects - Push AddRefs internally via AHK. */
         if (value->vt == VT_DISPATCH && value->pdispVal) {
             value->pdispVal->lpVtbl->Release(value->pdispVal);
@@ -309,7 +287,7 @@ static int assign_to_top(frame_t *top, VARIANT *value)
         if (value->vt != VT_BSTR) {
             char msg[64];
             snprintf(msg, sizeof(msg), "Non-string map keys not supported yet (vt=%d)", (int)value->vt);                                             
-            set_err(msg, g_cur_line, g_cur_col);
+            set_err(msg, NULL, g_cur_line, g_cur_col);
             return -1;
         }
         top->pending_key = value->bstrVal;
@@ -323,7 +301,7 @@ static int assign_to_top(frame_t *top, VARIANT *value)
         rc = perform_merge(top->obj, value);
     } else {
         HRESULT hr = ahk_map_set(top->obj, top->pending_key, value);
-        if (hr != S_OK) { set_err("Map set failed", 0, 0); rc = -1; }
+        if (hr != S_OK) { set_err("Map set failed", NULL, 0, 0); rc = -1; }
     }
 
     /* Release key BSTR and our ref on the value. */
@@ -436,14 +414,12 @@ static void registry_free(anchor_registry_t *r)
 MCL_EXPORT(loads, Ptr, utf8, Int64, len, Ptr, pOut, CDecl_Int);
 int loads(const char *utf8, int64_t len, VARIANT *pOut)
 {
-    g_err_line = 0;
-    g_err_column = 0;
-    g_err_message[0] = 0;
+    clear_err();
     pOut->vt = VT_EMPTY;
 
     yaml_parser_t parser;
     if (!yaml_parser_initialize(&parser)) {
-        set_err("parser init failed", 0, 0);
+        set_err("Parser init failed", NULL, 0, 0);
         return -1;
     }
     yaml_parser_set_input_string(&parser, (const unsigned char *)utf8, (size_t)len);
@@ -464,7 +440,8 @@ int loads(const char *utf8, int64_t len, VARIANT *pOut)
     for (;;) {
         yaml_event_t ev;
         if (!yaml_parser_parse(&parser, &ev)) {
-            set_err(parser.problem ? parser.problem : "parse error",
+            set_err(parser.problem ? parser.problem : "Unknown parse error", 
+                    NULL,
                     (int)parser.problem_mark.line + 1,
                     (int)parser.problem_mark.column + 1);
             rc = -1;
@@ -483,7 +460,7 @@ int loads(const char *utf8, int64_t len, VARIANT *pOut)
         case YAML_DOCUMENT_END_EVENT:
             doc_count++;
             if (doc_count > 1) {
-                set_err("Multiple documents in stream (use ParseAll)", 0, 0);
+                set_err("Multiple documents in stream (use ParseAll)", NULL, 0, 0);
                 rc = -2;
                 done = 1;
             }
@@ -496,7 +473,8 @@ int loads(const char *utf8, int64_t len, VARIANT *pOut)
         case YAML_ALIAS_EVENT: {
             VARIANT v;
             if (registry_get(&registry, ev.data.alias.anchor, &v) != 0) {
-                set_err("undefined anchor",
+                set_err("Undefined anchor",
+                        (char*)ev.data.alias.anchor,
                         (int)ev.start_mark.line + 1,
                         (int)ev.start_mark.column + 1);
                 rc = -1; done = 1; break;
@@ -515,7 +493,7 @@ int loads(const char *utf8, int64_t len, VARIANT *pOut)
             if (emit_scalar(&ev, &v) != 0) { rc = -1; done = 1; break; }
             if (ev.data.scalar.anchor) {
                 if (registry_set(&registry, ev.data.scalar.anchor, &v) != 0) {
-                    set_err("anchor registration failed", 0, 0);
+                    set_err("Anchor registration failed", (char*)ev.data.alias.anchor, 0, 0);
                     variant_release(&v);
                     rc = -1; done = 1; break;
                 }
@@ -532,13 +510,13 @@ int loads(const char *utf8, int64_t len, VARIANT *pOut)
         case YAML_MAPPING_START_EVENT:
         case YAML_SEQUENCE_START_EVENT: {
             if (depth >= MAX_DEPTH) {
-                set_err("YAML nesting too deep", 0, 0);
+                set_err("YAML nesting too deep", NULL, 0, 0);
                 rc = -1; done = 1; break;
             }
             int is_map = (ev.type == YAML_MAPPING_START_EVENT);
             IDispatch *obj = is_map ? ahk_new_map() : ahk_new_array();
             if (!obj) {
-                set_err("Failed to construct Map/Array", 0, 0);
+                set_err("Failed to construct Map/Array", NULL, 0, 0);
                 rc = -1; done = 1; break;
             }
             const unsigned char *anchor = is_map
@@ -549,7 +527,7 @@ int loads(const char *utf8, int64_t len, VARIANT *pOut)
                 vd.vt = VT_DISPATCH;
                 vd.pdispVal = obj;   /* registry_set AddRefs via dup_variant */
                 if (registry_set(&registry, anchor, &vd) != 0) {
-                    set_err("anchor registration failed", 0, 0);
+                    set_err("Anchor registration failed", (char*)anchor, 0, 0);
                     obj->lpVtbl->Release(obj);
                     rc = -1; done = 1; break;
                 }

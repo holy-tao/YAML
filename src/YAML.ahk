@@ -11,8 +11,8 @@ class YAMLError extends Error {
  * reported by the parser.
  */
 class YAMLParseError extends YAMLError {
-    __New(message, what, line := 0, column := 0) {
-        super.__New(message, what)
+    __New(message, what, extra, line := 0, column := 0) {
+        super.__New(message, what, extra)
         this.Line := line
         this.Column := column
     }
@@ -129,7 +129,8 @@ class YAML {
             if r == -2
                 throw YAMLMultiDocError("YAML stream contains multiple documents; use YAML.ParseAll")
             msg := StrGet(this.lib.get_err_message(), "UTF-8")
-            throw YAMLParseError(msg, A_ThisFunc, this.lib.g_err_line, this.lib.g_err_column)
+            extra := StrGet(this.lib.get_err_extra(), "UTF-8")
+            throw YAMLParseError(msg, A_ThisFunc, extra, this.lib.g_err_line, this.lib.g_err_column)
         }
 
         result := ComValue(0x400C, out.Ptr)[]
@@ -169,8 +170,10 @@ class YAML {
         vref[] := 0
 
         if r {
-            msg := StrGet(this.lib.get_dump_err_message(), "UTF-8")
-            throw YAMLError("YAML dump failed: " msg)
+            msg := StrGet(this.lib.get_err_message(), "UTF-8")
+            extra := StrGet(this.lib.get_err_extra(), "UTF-8")
+
+            throw YAMLError("YAML dump failed: " msg, A_ThisFunc, extra)
         }
 
         bufPtr := NumGet(pOutPtr, "Ptr")

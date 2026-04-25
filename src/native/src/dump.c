@@ -1,4 +1,5 @@
 #include "ahk_bridge.h"
+#include "ahk_error.h"
 
 #include <yaml.h>
 #include <stdlib.h>
@@ -28,28 +29,6 @@ static int outbuf_write_handler(void *user, unsigned char *buf, size_t size)
     return 1;
 }
 
-#pragma region Errors
-
-static int  g_dump_err_line;   MCL_EXPORT_GLOBAL(g_dump_err_line, Int);
-static int  g_dump_err_column; MCL_EXPORT_GLOBAL(g_dump_err_column, Int);
-static char g_dump_err_message[256];
-
-MCL_EXPORT(get_dump_err_message, CDecl_Ptr);
-const char *get_dump_err_message(void) { return g_dump_err_message; }
-
-static void set_dump_err(const char *msg)
-{
-    g_dump_err_line = 0;
-    g_dump_err_column = 0;
-    int i = 0;
-    while (msg[i] && i < (int)sizeof(g_dump_err_message) - 1) {
-        g_dump_err_message[i] = msg[i];
-        i++;
-    }
-    g_dump_err_message[i] = 0;
-}
-
-#pragma endregion
 #pragma region Parsing / Dispatch
 
 /**
@@ -294,7 +273,7 @@ static int emit_map(yaml_emitter_t *em, ref_table_t *t, IDispatch *obj,
 
     VARIANT en;
     if (get_enum2(obj, &en) != 0) {
-        set_dump_err("failed to obtain Map enumerator");
+        set_err("Failed to obtain Map enumerator", NULL, 0, 0);
         return -1;
     }
     int rc = 0;
@@ -327,7 +306,7 @@ static int emit_array(yaml_emitter_t *em, ref_table_t *t, IDispatch *obj,
 
     VARIANT en;
     if (get_enum2(obj, &en) != 0) {
-        set_dump_err("failed to obtain Array enumerator");
+        set_err("Failed to obtain Array enumerator", NULL, 0, 0);
         return -1;
     }
     int rc = 0;
@@ -382,7 +361,8 @@ static int emit_dispatch(yaml_emitter_t *em, ref_table_t *t, IDispatch *obj)
     if (call_has_method(obj, s_bstrSet.szData))
         return emit_map(em, t, obj, anchor);
 
-    set_dump_err("Unsupported object type (not Map or Array)");
+    // TODO probe for a __Class property and include its value in the error message
+    set_err("Unsupported object type (not Map or Array)", NULL, 0, 0);
     return -1;
 }
 
@@ -410,7 +390,7 @@ static int emit_value(yaml_emitter_t *em, ref_table_t *t, VARIANT *v)
             return emit_plain(em, "null", 4);
         return emit_dispatch(em, t, v->pdispVal);
     default:
-        set_dump_err("Unsupported VARIANT type");
+        set_err("Unsupported VARIANT type", NULL, 0, 0);
         return -1;
     }
 }
@@ -421,7 +401,7 @@ static int emit_value(yaml_emitter_t *em, ref_table_t *t, VARIANT *v)
 MCL_EXPORT(dumps, Ptr, pIn, Int, bPretty, Ptr, ppOut, Ptr, pOutSize, CDecl_Int);
 int dumps(VARIANT *pIn, int bPretty, unsigned char **ppOut, int64_t *pOutSize)
 {
-    g_dump_err_message[0] = 0;
+    clear_err();
     *ppOut = NULL;
     *pOutSize = 0;
 
@@ -430,14 +410,14 @@ int dumps(VARIANT *pIn, int bPretty, unsigned char **ppOut, int64_t *pOutSize)
 
     /* Pass 1: count references so we know which objects need anchors. */
     if (count_value(&rt, pIn) != 0) {
-        set_dump_err("reference table overflow");
+        set_err("Reference table overflow", NULL, 0, 0);
         reftab_free(&rt);
         return -1;
     }
 
     yaml_emitter_t em;
     if (!yaml_emitter_initialize(&em)) {
-        set_dump_err("emitter init failed");
+        set_err("Emitter init failed", NULL, 0, 0);
         return -1;
     }
     yaml_emitter_set_output(&em, outbuf_write_handler, &ob);
@@ -463,8 +443,8 @@ int dumps(VARIANT *pIn, int bPretty, unsigned char **ppOut, int64_t *pOutSize)
         !yaml_emitter_emit(&em, &ev)) { rc = -1; goto done; }
 
 done:
-    if (rc != 0 && g_dump_err_message[0] == 0) {
-        set_dump_err(em.problem ? em.problem : "emitter failed");
+    if (rc != 0 && g_err_message[0] == 0) {
+        set_err(em.problem ? em.problem : "Unknown emitter error", NULL, 0, 0);
     }
     yaml_emitter_delete(&em);
     reftab_free(&rt);
