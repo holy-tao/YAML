@@ -86,21 +86,16 @@ code := shell "`n" FileRead(native "\parse.c") "`n" FileRead(native "\dump.c")
 
 defines := ' -DYAML_VERSION_MAJOR=0 -DYAML_VERSION_MINOR=2 -DYAML_VERSION_PATCH=5 -DYAML_VERSION_STRING=\"0.2.5\" '
 
-; No `bitness` field - StandaloneAHKFromC will produce both 32 and 64 bit. Optimize for size
-constantFlags := "-mno-stack-arg-probe"
+; Optimize for size. -mno-stack-arge-probe is required to prevent the linker error
+; `Reference to undefined symbol ___chkstk_ms` that happens because gcc inserts a
+; stack probe in for stack frames > 4kb, which we use in Parse to hold the object
+; stack
+constantFlags := "-mno-stack-arg-probe -Os"
 
 ; When the runner has debug logging on (re-run with "Enable debug logging" or
 ; ACTIONS_STEP_DEBUG secret), ask gcc to be loud.
 if EnvGet("RUNNER_DEBUG") = "1" || HasArg("debug") {
     constantFlags .= " -v -ftime-report -fmem-report"
-}
-
-if !EnvGet("GITHUB_ACTIONS") {
-    constantFlags .= " -Os"
-}
-
-compilerOptions := {
-    flags: constantFlags " -I `"" shims "`" -I `"" libyaml "\include`" -I `"" libyamlSrc "`" -I `"" native "`" " defines
 }
 
 rendererOptions := {
@@ -110,72 +105,94 @@ rendererOptions := {
     compress: true
 }
 
-FileAppend("Compiling parse.c + dump.c + libyaml (32 and 64 bit)...`n", "*")
-FileAppend(Format("  code size: {} bytes`n", StrLen(code)), "*")
-
-try {
-    FileAppend("  calling MCL.StandaloneAHKFromC...`n", "*")
-    standalone := MCL.StandaloneAHKFromC(code, compilerOptions, rendererOptions)
-    FileAppend(Format("  returned: {} bytes of standalone output`n", StrLen(standalone)), "*")
-} catch Any as e {
-    FileAppend("`n=== CAUGHT " Type(e) " ===`n", "*")
-    FileAppend("Message: " (e.HasProp("Message") ? e.Message : "<none>") "`n", "*")
-    FileAppend("Extra:   " (e.HasProp("Extra")   ? e.Extra   : "<none>") "`n", "*")
-    FileAppend("Stack:`n" (e.HasProp("Stack")    ? e.Stack   : "<none>") "`n", "*")
-    ExitApp(1)
+for bitness in ["", 32, 64] {
+    Build(bitness)
 }
 
-facade := FileRead(root "\src\YAML.ahk")
+/**
+ * Run the actual build
+ * @param {32 | 64 | ""} bitness Bitness to build for, or a falsy value to build for all
+ */
+Build(bitness := "") {
+    compilerOptions := {
+        flags: constantFlags " -I `"" shims "`" -I `"" libyaml "\include`" -I `"" libyamlSrc "`" -I `"" native "`" " defines
+    }
 
-; Strip the per-file `#Requires` from the facade - we add one at the top of
-; the amalgamation.
-facade := RegExReplace(facade, "^#Requires[^\r\n]*\R", "")
+    if bitness
+        compilerOptions.bitness := bitness
 
-; Copy the relevant licenses into the header to be polite - luckily everything's MIT.
-header := Format("
-(comments
-/*
-[LibYAML] powered YAML library for AutoHotkey v2. Distributed under the MIT License:
+    msg := Format("Compiling parse.c + dump.c + libyaml ({1})...`n", 
+        bitness ? bitness " bit" : "bitness-agnositc")
 
-{1}
----
+    FileAppend(msg, "*")
+    FileAppend(Format("  code size: {} bytes`n", StrLen(code)), "*")
 
-Portions [MCL.ahk] distributed under the MIT License:
+    try {
+        FileAppend("  calling MCL.StandaloneAHKFromC...`n", "*")
+        standalone := MCL.StandaloneAHKFromC(code, compilerOptions, rendererOptions)
+        FileAppend(Format("  returned: {} bytes of standalone output`n", StrLen(standalone)), "*")
+    } catch Any as e {
+        FileAppend("`n=== CAUGHT " Type(e) " ===`n", "*")
+        FileAppend("Message: " (e.HasProp("Message") ? e.Message : "<none>") "`n", "*")
+        FileAppend("Extra:   " (e.HasProp("Extra")   ? e.Extra   : "<none>") "`n", "*")
+        FileAppend("Stack:`n" (e.HasProp("Stack")    ? e.Stack   : "<none>") "`n", "*")
+        ExitApp(1)
+    }
 
-{2}
----
+    facade := FileRead(root "\src\YAML.ahk")
 
-LibYAML is embedded as compiled code and is distributed under the MIT license:
+    ; Strip the per-file `#Requires` from the facade - we add one at the top of
+    ; the amalgamation.
+    facade := RegExReplace(facade, "^#Requires[^\r\n]*\R", "")
 
-{3}
----
+    ; Copy the relevant licenses into the header to be polite - luckily everything's MIT.
+    header := Format("
+    (comments
+    /*
+    [LibYAML] powered YAML library for AutoHotkey v2. Distributed under the MIT License:
 
-[MCL.ahk]: https://github.com/G33kDude/MCL.ahk
-[LibYAML]: https://github.com/yaml/libyaml
+    {1}
+    ---
 
-Generated {4} (UTC) @ {5}
-With libraries:
-  LibYAML: {6}
-  MCL:     {7}
-*/
+    Portions [MCL.ahk] distributed under the MIT License:
 
-#Requires AutoHotkey v2.0
+    {2}
+    ---
 
-)", 
-    FileRead("../LICENSE", "UTF-8"), 
-    FileRead("../src/Lib/MCL/LICENSE", "UTF-8"), 
-    FileRead("../src/native/libyaml/License", "UTF-8"),
-    FormatTime(A_NowUTC),
-    thisCommit, libYamlCommit, mclCommit
-)
+    LibYAML is embedded as compiled code and is distributed under the MIT license:
 
-out := header "`n" facade "`n" standalone "`n"
+    {3}
+    ---
 
-distPath := dist "\YAML.ahk"
-dest := FileOpen(distPath, "w", "UTF-8")
-dest.Write(out)
-sz := dest.Length
-dest.Close()
+    [MCL.ahk]: https://github.com/G33kDude/MCL.ahk
+    [LibYAML]: https://github.com/yaml/libyaml
 
-FileAppend(Format("Wrote {} ({} bytes)`n", distPath, sz), "*")
+    Generated {4} (UTC) @ {5}
+    With libraries:
+    LibYAML: {6}
+    MCL:     {7}
+    */
+
+    #Requires AutoHotkey v2.0 {8}
+
+    )", 
+        FileRead("../LICENSE", "UTF-8"), 
+        FileRead("../src/Lib/MCL/LICENSE", "UTF-8"), 
+        FileRead("../src/native/libyaml/License", "UTF-8"),
+        FormatTime(A_NowUTC),
+        thisCommit, libYamlCommit, mclCommit,
+        bitness ? bitness "-bit" : ""
+    )
+
+    out := header "`n" facade "`n" standalone "`n"
+
+    distPath := Format("{1}\YAML{2}.ahk", dist, bitness || "")
+    dest := FileOpen(distPath, "w", "UTF-8")
+    dest.Write(out)
+    sz := dest.Length
+    dest.Close()
+
+    FileAppend(Format("Wrote {} ({} bytes)`n", distPath, sz), "*")
+}
+
 ExitApp 0
