@@ -106,7 +106,12 @@ typedef struct {
     int count;
     int capacity;
     int next_id;
+    int has_ahk_tag;  /* set in pass 1 if any object will emit a TagPrefix tag */
 } ref_table_t;
+
+/* Keep in sync with YAML.TagPrefix / YAML.TagHandle in src/YAML.ahk. */
+#define AHK_TAG_HANDLE "!ahk!"
+#define AHK_TAG_PREFIX "tag:github.com,2026:holy-tao/yaml/ahk/object/"
 
 static ref_entry_t *reftab_find(ref_table_t *t, IDispatch *obj)
 {
@@ -173,11 +178,15 @@ static int count_dispatch(ref_table_t *t, IDispatch *obj)
     }
     if (!reftab_insert(t, obj)) return -1;
 
-    /* ToYAML wins over Push/Set: the user's serialization wraps the children,
+    /**
+     * ToYAML wins over Push/Set: the user's serialization wraps the children,
      * so don't walk into wrapper internals here. The replacement value emitted
-     * later in pass 2 is a fresh subtree with its own (un-counted) identity. */
-    if (pObjToYAML && call_has_method(obj, s_bstrToYAML.szData))
+     * later in pass 2 is a fresh subtree with its own (un-counted) identity. 
+     */
+    if (pObjToYAML && call_has_method(obj, s_bstrToYAML.szData)) {
+        t->has_ahk_tag = 1;
         return 0;
+    }
 
     /* Recurse into children only on first visit. */
     if (call_has_method(obj, s_bstrPush.szData))
@@ -511,7 +520,15 @@ static int emit_value(yaml_emitter_t *em, ref_table_t *t, VARIANT *v)
 static int emit_one_doc(yaml_emitter_t *em, ref_table_t *rt, VARIANT *value)
 {
     yaml_event_t ev;
-    if (!yaml_document_start_event_initialize(&ev, NULL, NULL, NULL, 1) ||
+    yaml_tag_directive_t td = {
+        (yaml_char_t *)AHK_TAG_HANDLE,
+        (yaml_char_t *)AHK_TAG_PREFIX
+    };
+    yaml_tag_directive_t *td_start = rt->has_ahk_tag ? &td : NULL;
+    yaml_tag_directive_t *td_end   = rt->has_ahk_tag ? &td + 1 : NULL;
+    /* Documents with %TAG directives must use the explicit `---` marker. */
+    int implicit = rt->has_ahk_tag ? 0 : 1;
+    if (!yaml_document_start_event_initialize(&ev, NULL, td_start, td_end, implicit) ||
         !yaml_emitter_emit(em, &ev)) return -1;
     if (emit_value(em, rt, value) != 0) return -1;
     if (!yaml_document_end_event_initialize(&ev, 1) ||
@@ -527,7 +544,7 @@ int dumps(VARIANT *pIn, int bPretty, unsigned char **ppOut, int64_t *pOutSize)
     *pOutSize = 0;
 
     outbuf_t ob = { .data = NULL, .size = 0, .capacity = 0, .oom = 0 };
-    ref_table_t rt = { NULL, 0, 0, 0 };
+    ref_table_t rt = { NULL, 0, 0, 0, 0 };
 
     /* Pass 1: count references so we know which objects need anchors. */
     if (count_value(&rt, pIn) != 0) {
@@ -617,7 +634,7 @@ int dumps_all(VARIANT *pIn, int bPretty, unsigned char **ppOut, int64_t *pOutSiz
             VARIANT idx, doc;
             if (!enum_next(en.pdispVal, &idx, &doc)) break;
 
-            ref_table_t rt = { NULL, 0, 0, 0 };
+            ref_table_t rt = { NULL, 0, 0, 0, 0 };
             if (count_value(&rt, &doc) != 0) {
                 set_err("Reference table overflow", NULL, 0, 0);
                 reftab_free(&rt);

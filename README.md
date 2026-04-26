@@ -113,25 +113,35 @@ Unrecognized tags are ignored.
 1. Implement a static `FromYAML` method that takes a raw deserialized value (an [`Array`], [`Map`], or [`Primitive`]) and returns some value to include in the final deserialized graph
 2. Implement an instance `ToYAML` method that reterns either an [`Array`], [`Map`], or [`Primitive`] to be serialized.
 
-For example, given the following Point class:
 ```autohotkey
-class Point {
-    __New(x, y) {
-        this.x := x
-        this.y := y
+#Include <YAML>
+
+class Rect {
+    __New(left, top, width, height) {
+        this.left := left
+        this.top := top
+        this.width := width
+        this.height := height
     }
 
-    static FromYAML(m) => Point(m["x"], m["y"])
-    ToYAML() => Map("x", this.x, "y", this.y)
+    static FromYAML(m) => Rect(m["left"], m["top"], m["width"], m["height"])
+    ToYAML() => Map("left", this.left, "top", this.top, "width", this.width, "height", this.height)
 }
+
+serialized := YAML.Dump(Rect(10, 10, 20, 30), true)
+FileAppend(serialized "`n", "*")
 ```
 
-`YAML.Dump` returns a string like this:
 ```yaml
-!<tag:github.com,2026:holy-tao/yaml/ahk/object/Point>
-x: 10
-"y": 20 # note the y is quoted to disambiguate from the YAML 1.1 boolean value
+%TAG !ahk! tag:github.com,2026:holy-tao/yaml/ahk/object/
+--- !ahk!Rect
+height: 30
+left: 10
+top: 10
+width: 20
 ```
+
+(Note mapping key order is not preserved, keys are sorted in the order that the AutoHotkey [`Map`] sorts them, which is generally alphanumerically for strings.)
 
 [`Map`]: https://www.autohotkey.com/docs/v2/lib/Map.htm
 [`Array`]: https://www.autohotkey.com/docs/v2/lib/Array.htm

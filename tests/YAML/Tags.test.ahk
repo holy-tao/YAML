@@ -3,9 +3,6 @@
 #Include ../YUnit/Assert.ahk
 #Include ../../dist/YAML.ahk
 
-; --- Custom-class fixtures (must be top-level so YAML._ObjFromYAML can resolve
-; them via dynamic %name% lookup against the global scope) ---
-
 ;@ahkunit-ignore
 class TagFixturePerson {
     __New(name := "", age := 0) {
@@ -67,7 +64,8 @@ class TagsTest {
             src := YAML.Dump(p)
             FileAppend(src, "*")
 
-            Assert.Truthy(InStr(src, "tag:github.com,2026:holy-tao/yaml/ahk/object/TagFixturePerson"))
+            Assert.Truthy(InStr(src, "tag:github.com,2026:holy-tao/yaml/ahk/object/"))
+            Assert.Truthy(InStr(src, "!ahk!TagFixturePerson"))
             back := YAML.Parse(src)
             refCount := ObjAddRef(ObjPtr(back)) - 1
             ObjRelease(ObjPtr(back))
@@ -105,10 +103,24 @@ class TagsTest {
         TestNestedClass() {
             v := TagFixtureOuter.Inner(99)
             src := YAML.Dump(v)
-            Assert.Truthy(InStr(src, "ahk/object/TagFixtureOuter.Inner"))
+            Assert.Truthy(InStr(src, "!ahk!TagFixtureOuter.Inner"))
             back := YAML.Parse(src)
             Assert.IsType(back, TagFixtureOuter.Inner)
             Assert.Equals(back.V, 99)
+        }
+
+        TestTagDirective() {
+            src := "%TAG !ahk! tag:github.com,2026:holy-tao/yaml/ahk/object/`n" .
+                   "---`n" .
+                   "!ahk!TagFixturePerson`n" .
+                   "name: bob`n" .
+                   "age: 42`n"
+            
+            obj := YAML.Parse(src)
+
+            Assert.IsType(obj, TagFixturePerson)
+            Assert.Equals(obj.Name, "bob")
+            Assert.Equals(obj.Age, 42)
         }
     }
 
@@ -119,6 +131,7 @@ class TagsTest {
             try {
                 src := "!<tag:github.com,2026:holy-tao/yaml/ahk/object/NoSuchClass>`nfoo: 1`n"
                 e := Assert.Throws(() => YAML.Parse(src), YAMLParseError)
+                FileAppend(e.Message "`n", "*")
                 Assert.Truthy(InStr(e.Extra, "NoSuchClass"))
             } finally {
                 YAML.StrictTags := saved
@@ -157,7 +170,6 @@ class TagsTest {
             Assert.InStr(e.Message, "intentional ToYAML failure")
         }
 
-        ; FIXME: exit code 3221226356
         TestFromYAMLThrows() {
             saved := YAML.StrictTags
             YAML.StrictTags := true
@@ -169,7 +181,8 @@ class TagsTest {
                     key: val
                 )"
                 e := Assert.Throws(() => YAML.Parse(src), YAMLParseError)
-                Assert.InStr(e.Extra, "TagFixtureBoomOnLoad")
+                FileAppend(e.Message "`n", "*")
+                Assert.InStr(e.Message, "TagFixtureBoomOnLoad")
             } finally {
                 YAML.StrictTags := saved
             }
@@ -178,11 +191,17 @@ class TagsTest {
 
     class StandardTags {
         TestStrTagForcesString() {
-            Assert.Equals(YAML.Parse("!!str 42"), "42")
+            parsed := YAML.Parse("!!str 42")
+
+            Assert.IsType(parsed, String)
+            Assert.Equals(parsed, "42")
         }
 
         TestStrFullURIForcesString() {
-            Assert.Equals(YAML.Parse("!<tag:yaml.org,2002:str> 42"), "42")
+            parsed := YAML.Parse("!<tag:yaml.org,2002:str> 42")
+
+            Assert.IsType(parsed, String)
+            Assert.Equals(parsed, "42")
         }
 
         TestIntTagCoerces() {
@@ -205,11 +224,13 @@ class TagsTest {
 
         TestIntTagMismatch() {
             e := Assert.Throws(() => YAML.Parse("!!int notanumber"), YAMLParseError)
+            FileAppend(e.Message "`n", "*")
             Assert.Truthy(InStr(e.Extra, "tag:yaml.org,2002:int"))
         }
 
         TestBoolTagMismatch() {
             e := Assert.Throws(() => YAML.Parse("!!bool maybe"), YAMLParseError)
+            FileAppend(e.Message "`n", "*")
             Assert.Truthy(InStr(e.Extra, "tag:yaml.org,2002:bool"))
         }
     }

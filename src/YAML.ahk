@@ -94,6 +94,14 @@ class YAML {
     static TagPrefix => "tag:github.com,2026:holy-tao/yaml/ahk/object/"
 
     /**
+     * Shorthand handle registered as a `%TAG` directive at document start
+     * when dumping objects whose tag URI begins with `TagPrefix`. Lets the
+     * emitter write `!ahk!ClassName` instead of the full URI at every site.
+     * Kept in sync with AHK_TAG_HANDLE in src/native/src/dump.c.
+     */
+    static TagHandle => "!ahk!"
+
+    /**
      * Get the tag string for an object.
      * 
      * @param {Object} obj the object to get the tag for 
