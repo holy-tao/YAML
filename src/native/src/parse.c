@@ -254,7 +254,7 @@ typedef enum { FRAME_MAP, FRAME_ARRAY } frame_kind_t;
 typedef struct {
     frame_kind_t kind;
     IDispatch *obj;
-    BSTR pending_key;   /* maps: buffered key awaiting its value */
+    VARIANT pending_key; /* maps: buffered key awaiting its value (any VARIANT) */
     int  has_key;
     char *tag;          /* owned dup of START event tag, or NULL */
     char *anchor;       /* owned dup of START event anchor, or NULL */
@@ -312,16 +312,19 @@ static int dispatch_custom_tag(const char *tag, VARIANT *v, int line, int col)
 static int g_cur_line;
 static int g_cur_col;
 
-/* True iff `key` is exactly the two-character BSTR "<<". */
-static int is_merge_key(BSTR key)
+/* True iff `key` is exactly the two-character BSTR "<<". Non-string keys are
+ * trivially not merge keys. */
+static int is_merge_key(const VARIANT *key)
 {
-    return key && key[0] == L'<' && key[1] == L'<' && key[2] == 0;
+    return key->vt == VT_BSTR && key->bstrVal
+        && key->bstrVal[0] == L'<' && key->bstrVal[1] == L'<'
+        && key->bstrVal[2] == 0;
 }
 
 /**
  * Merge entries from `src` into `dst`, skipping keys already present in `dst`.
- * Only string keys are considered; non-string keys are ignored (merge sources
- * built from YAML always have BSTR keys, matching the parser's invariant).
+ * All key types (strings, ints, floats, sentinels, complex collections) are
+ * propagated.
  */
 static int merge_one(IDispatch *dst, IDispatch *src)
 {
@@ -335,12 +338,10 @@ static int merge_one(IDispatch *dst, IDispatch *src)
     for (;;) {
         VARIANT k, v;
         if (!enum_next(en.pdispVal, &k, &v)) break;
-        if (k.vt == VT_BSTR && k.bstrVal) {
-            if (!ahk_map_has(dst, k.bstrVal)) {
-                if (ahk_map_set(dst, k.bstrVal, &v) != S_OK) {
-                    set_err("Map set failed", NULL, g_cur_line, g_cur_col);
-                    rc = -1;
-                }
+        if (!ahk_map_has(dst, &k)) {
+            if (ahk_map_set(dst, &k, &v) != S_OK) {
+                set_err("Map set failed", NULL, g_cur_line, g_cur_col);
+                rc = -1;
             }
         }
         variant_release(&k);
@@ -417,32 +418,25 @@ static int assign_to_top(frame_t *top, VARIANT *value)
         return 0;
     }
 
-    /* Map: first scalar is the key. */
+    /* Map: first node is the key. Any VARIANT type is accepted (AHK Map
+     * supports arbitrary keys). The frame takes ownership of the VARIANT. */
     if (!top->has_key) {
-        /* Key must be a BSTR (YAML allows complex keys; we coerce or reject). */
-        if (value->vt != VT_BSTR) {
-            char msg[64];
-            snprintf(msg, sizeof(msg), "Non-string map keys not supported yet (vt=%d)", (int)value->vt);                                             
-            set_err(msg, NULL, g_cur_line, g_cur_col);
-            return -1;
-        }
-        top->pending_key = value->bstrVal;
+        top->pending_key = *value;
         top->has_key = 1;
         return 0;
     }
 
     /* Have key = this value completes the pair. */
     int rc = 0;
-    if (bResolveMergeKeys && is_merge_key(top->pending_key)) {
+    if (bResolveMergeKeys && is_merge_key(&top->pending_key)) {
         rc = perform_merge(top->obj, value);
     } else {
-        HRESULT hr = ahk_map_set(top->obj, top->pending_key, value);
+        HRESULT hr = ahk_map_set(top->obj, &top->pending_key, value);
         if (hr != S_OK) { set_err("Map set failed", NULL, 0, 0); rc = -1; }
     }
 
-    /* Release key BSTR and our ref on the value. */
-    SysFreeString(top->pending_key);
-    top->pending_key = NULL;
+    /* Release key VARIANT and our ref on the value. */
+    variant_release(&top->pending_key);
     top->has_key = 0;
     if (value->vt == VT_DISPATCH && value->pdispVal) {
         value->pdispVal->lpVtbl->Release(value->pdispVal);
@@ -678,7 +672,7 @@ static int parse_one_doc(yaml_parser_t *parser,
             }
             stack[depth].kind = is_map ? FRAME_MAP : FRAME_ARRAY;
             stack[depth].obj = obj;
-            stack[depth].pending_key = NULL;
+            stack[depth].pending_key.vt = VT_EMPTY;
             stack[depth].has_key = 0;
             stack[depth].tag = dup_cstr(is_map
                 ? ev.data.mapping_start.tag
@@ -746,7 +740,7 @@ static int parse_one_doc(yaml_parser_t *parser,
 
     if (rc != 0) {
         for (int i = 0; i < depth; i++) {
-            if (stack[i].pending_key) SysFreeString(stack[i].pending_key);
+            if (stack[i].has_key) variant_release(&stack[i].pending_key);
             if (stack[i].obj) stack[i].obj->lpVtbl->Release(stack[i].obj);
             if (stack[i].tag) free(stack[i].tag);
             if (stack[i].anchor) free(stack[i].anchor);

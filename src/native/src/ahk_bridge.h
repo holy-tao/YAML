@@ -118,14 +118,23 @@ static IDispatch *ahk_new_array(void)
     return out.pdispVal;
 }
 
-/* map[key] = *value  (DISPID_VALUE + DISPATCH_PROPERTYPUT, named arg). */
-static HRESULT ahk_map_set(IDispatch *map, BSTR key, VARIANT *value)
+static DISPID dispatch_get_dispid(IDispatch *obj, wchar_t *strName) {
+    LPOLESTR name = (LPOLESTR)strName;
+    DISPID out = 0;
+    HRESULT hr = obj->lpVtbl->GetIDsOfNames(obj, g_IID_NULL, &name, 1, 0,
+                                            &out);
+
+    return hr == S_OK ? out : DISPID_UNKNOWN;
+}
+
+/* map[*key] = *value  (DISPID_VALUE + DISPATCH_PROPERTYPUT, named arg).
+ * Key may be any VARIANT type; AHK Map handles arbitrary keys. */
+static HRESULT ahk_map_set(IDispatch *map, VARIANT *key, VARIANT *value)
 {
     VARIANT args[2];
     /* rgvarg is in reverse order: args[0] = put-value, args[1] = key */
     args[0] = *value;
-    args[1].vt = VT_BSTR;
-    args[1].bstrVal = key;
+    args[1] = *key;
 
     DISPID dispidPut = DISPID_PROPERTYPUT;
     DISPPARAMS dp = {
@@ -141,24 +150,19 @@ static HRESULT ahk_map_set(IDispatch *map, BSTR key, VARIANT *value)
 /* arr.Push(*value) */
 static HRESULT ahk_array_push(IDispatch *arr, VARIANT *value)
 {
-    LPOLESTR name = (LPOLESTR)s_bstrPush.szData;
-    DISPID dispidPush = 0;
-    HRESULT hr = arr->lpVtbl->GetIDsOfNames(arr, g_IID_NULL, &name, 1, 0,
-                                             &dispidPush);
-    if (hr != S_OK) return hr;
+    DISPID dispid = dispatch_get_dispid(arr, s_bstrPush.szData);
+    if (dispid == DISPID_UNKNOWN) return DISP_E_UNKNOWNNAME;
 
     DISPPARAMS dp = {.cArgs = 1, .cNamedArgs = 0, .rgvarg = value};
-    return arr->lpVtbl->Invoke(arr, dispidPush, g_IID_NULL, 0,
+    return arr->lpVtbl->Invoke(arr, dispid, g_IID_NULL, 0,
                                 DISPATCH_METHOD, &dp, NULL, NULL, NULL);
 }
 
 /* obj.HasMethod(nameBstr) -> boolean. nameBstr is a DECLARE_BSTR szData pointer. */
 static int call_has_method(IDispatch *obj, void *nameBstr)
 {
-    LPOLESTR nm = (LPOLESTR)s_bstrHasMethod.szData;
-    DISPID dispid = 0;
-    if (obj->lpVtbl->GetIDsOfNames(obj, g_IID_NULL, &nm, 1, 0, &dispid) != S_OK)
-        return 0;
+    DISPID dispid = dispatch_get_dispid(obj, s_bstrHasMethod.szData);
+    if (dispid == DISPID_UNKNOWN) return DISP_E_UNKNOWNNAME;
 
     VARIANT arg = { .vt = VT_BSTR, .bstrVal = (BSTR)nameBstr };
     DISPPARAMS dp = { .cArgs = 1, .cNamedArgs = 0, .rgvarg = &arg };
@@ -171,15 +175,13 @@ static int call_has_method(IDispatch *obj, void *nameBstr)
            (r.vt == VT_BOOL && r.boolVal != 0);
 }
 
-/* map.Has(key) -> 1 if present, 0 otherwise (also 0 on dispatch failure). */
-static int ahk_map_has(IDispatch *map, BSTR key)
+/* map.Has(*key) -> 1 if present, 0 otherwise (also 0 on dispatch failure). */
+static int ahk_map_has(IDispatch *map, VARIANT *key)
 {
-    LPOLESTR nm = (LPOLESTR)s_bstrHas.szData;
-    DISPID dispid = 0;
-    if (map->lpVtbl->GetIDsOfNames(map, g_IID_NULL, &nm, 1, 0, &dispid) != S_OK)
-        return 0;
+    DISPID dispid = dispatch_get_dispid(map, s_bstrHas.szData);
+    if (dispid == DISPID_UNKNOWN) return DISP_E_UNKNOWNNAME;
 
-    VARIANT arg = { .vt = VT_BSTR, .bstrVal = key };
+    VARIANT arg = *key;
     DISPPARAMS dp = { .cArgs = 1, .cNamedArgs = 0, .rgvarg = &arg };
     VARIANT r = { .vt = VT_EMPTY };
     if (map->lpVtbl->Invoke(map, dispid, g_IID_NULL, 0, DISPATCH_METHOD,
@@ -196,10 +198,8 @@ static int ahk_map_has(IDispatch *map, BSTR key)
  */
 static int get_enum2(IDispatch *obj, VARIANT *outEnum)
 {
-    LPOLESTR nm = (LPOLESTR)s_bstrEnum.szData;
-    DISPID dispid = 0;
-    if (obj->lpVtbl->GetIDsOfNames(obj, g_IID_NULL, &nm, 1, 0, &dispid) != S_OK)
-        return -1;
+    DISPID dispid = dispatch_get_dispid(obj, s_bstrEnum.szData);
+    if (dispid == DISPID_UNKNOWN) return DISP_E_UNKNOWNNAME;
 
     VARIANT two = { .vt = VT_I4, .intVal = 2 };
     DISPPARAMS dp = { .cArgs = 1, .cNamedArgs = 0, .rgvarg = &two };

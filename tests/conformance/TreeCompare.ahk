@@ -20,10 +20,24 @@ class TreeCompare {
             if a.Count != b.Count
                 return false
             for k, va in a {
-                if !b.Has(k)
-                    return false
-                if !this.Equal(va, b[k])
-                    return false
+                if IsObject(k) && !(k == YAML.Null || k == YAML.True || k == YAML.False) {
+                    ; Complex (Array/Map) key: AHK Map.Has uses object identity, so a
+                    ; round-tripped key won't match. Find a structurally-equal key.
+                    matched := false
+                    for kb, vb in b {
+                        if this.Equal(k, kb) && this.Equal(va, vb) {
+                            matched := true
+                            break
+                        }
+                    }
+                    if !matched
+                        return false
+                } else {
+                    if !b.Has(k)
+                        return false
+                    if !this.Equal(va, b[k])
+                        return false
+                }
             }
             return true
         }
