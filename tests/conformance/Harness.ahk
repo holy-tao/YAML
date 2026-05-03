@@ -37,35 +37,40 @@ class ConformanceHarness {
                 hasJson:   FileExist(A_LoopFileFullPath "\in.json") != "",
                 hasYaml:   FileExist(A_LoopFileFullPath "\in.yaml") != "",
                 label:     FileExist(A_LoopFileFullPath "\===") ? Trim(FileRead(A_LoopFileFullPath "\===", "UTF-8"), " `t`r`n") : "",
-                multiDoc:  this._IsMultiDoc(A_LoopFileFullPath)
+                docCount:  this._DocCount(A_LoopFileFullPath)
             })
         }
         return out
     }
 
     /**
-     * The yaml-test-suite has no explicit multi-doc flag, but `test.event`
+     * The yaml-test-suite has no explicit doc-count metadata, but `test.event`
      * (the canonical libyaml event stream) lists every document as a `+DOC`
-     * line. Two or more means the fixture is a multi-document stream and
-     * needs ParseAll / DumpAll.
+     * line. Returns the integer count, or -1 when test.event is missing
+     * (callers treat -1 as "assume single-document").
+     *
+     * 0 docs (empty stream, comment-only, document-end-only) and 2+ docs both
+     * route through ParseAll / DumpAll / JsonAdapter.LoadAll; only count == 1
+     * uses the single-document Parse / Dump / JsonAdapter.Load path.
      */
-    _IsMultiDoc(dir) {
+    _DocCount(dir) {
         path := dir "\test.event"
         if !FileExist(path)
-            return false
+            return -1
         count := 0
         Loop Read, path {
             if SubStr(A_LoopReadLine, 1, 4) == "+DOC"
                 count++
-            if count > 1
-                return true
         }
-        return false
+        return count
     }
 
     _RunOne(t) {
         if !t.hasYaml
             return
+
+        ; Treat unknown doc counts (-1, no test.event) as single-doc.
+        useArrayPath := t.docCount != 1 && t.docCount != -1
 
         yamlText := FileRead(t.dir "\in.yaml", "UTF-8")
 
@@ -77,7 +82,7 @@ class ConformanceHarness {
         parseErrDesc := ""
 
         try {
-            parsed := t.multiDoc ? YAML.ParseAll(yamlText) : YAML.Parse(yamlText)
+            parsed := useArrayPath ? YAML.ParseAll(yamlText) : YAML.Parse(yamlText)
             parseOk := true
         } catch YAMLError as e {
             parseThrew := true
@@ -103,7 +108,7 @@ class ConformanceHarness {
             jsonOk := false
             try {
                 jsonText := FileRead(t.dir "\in.json", "UTF-8")
-                expected := t.multiDoc ? JsonAdapter.LoadAll(jsonText) : JsonAdapter.Load(jsonText)
+                expected := useArrayPath ? JsonAdapter.LoadAll(jsonText) : JsonAdapter.Load(jsonText)
                 jsonOk := true
             } catch as e {
                 this._Record("parse", t, false, "in.json load failed: " e.Message)
@@ -117,18 +122,18 @@ class ConformanceHarness {
                     this._Record("parse", t, match, match ? "" : "tree mismatch")
                 }
 
-                this._RunDumpFromJson(t, expected)
+                this._RunDumpFromJson(t, expected, useArrayPath)
             }
         }
 
         if parseOk
-            this._RunRoundTrip(t, parsed)
+            this._RunRoundTrip(t, parsed, useArrayPath)
     }
 
-    _RunRoundTrip(t, parsed) {
+    _RunRoundTrip(t, parsed, useArrayPath) {
         try {
-            dumped := t.multiDoc ? YAML.DumpAll(parsed) : YAML.Dump(parsed)
-            reparsed := t.multiDoc ? YAML.ParseAll(dumped) : YAML.Parse(dumped)
+            dumped := useArrayPath ? YAML.DumpAll(parsed) : YAML.Dump(parsed)
+            reparsed := useArrayPath ? YAML.ParseAll(dumped) : YAML.Parse(dumped)
             match := TreeCompare.Equal(parsed, reparsed)
             this._Record("round-trip", t, match, match ? "" : "reparsed tree mismatch")
         } catch as e {
@@ -136,10 +141,10 @@ class ConformanceHarness {
         }
     }
 
-    _RunDumpFromJson(t, tree) {
+    _RunDumpFromJson(t, tree, useArrayPath) {
         try {
-            dumped := t.multiDoc ? YAML.DumpAll(tree) : YAML.Dump(tree)
-            reparsed := t.multiDoc ? YAML.ParseAll(dumped) : YAML.Parse(dumped)
+            dumped := useArrayPath ? YAML.DumpAll(tree) : YAML.Dump(tree)
+            reparsed := useArrayPath ? YAML.ParseAll(dumped) : YAML.Parse(dumped)
             match := TreeCompare.Equal(tree, reparsed)
             this._Record("dump-json", t, match, match ? "" : "reparsed tree mismatch")
         } catch as e {
