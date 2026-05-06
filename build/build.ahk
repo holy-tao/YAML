@@ -73,7 +73,7 @@ static char* strdup(const char* s) {
     return p;
 }
 
-static int ferror(FILE* f) { (void)f; return 0; }
+MCL_IMPORT(int, msvcrt, ferror, (FILE*));
 
 #include <yaml.h>
 

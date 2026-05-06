@@ -18,6 +18,7 @@
 #Include ./YAML/MergeKeys.test.ahk
 #Include ./YAML/Tags.test.ahk
 #Include ./YAML/NonStringKeys.test.ahk
+#Include ./YAML/FileIO.test.ahk
 
 YUnit.Use(YunitResultCounter, YUnitJUnit, YUnitStdOut).Test(
 	ScalarsTest,
@@ -30,6 +31,7 @@ YUnit.Use(YunitResultCounter, YUnitJUnit, YUnitStdOut).Test(
 	MergeKeysTest,
 	TagsTest,
 	NonStringKeysTest,
+	FileIOTest,
 )
 
 Exit(-YunitResultCounter.failures)

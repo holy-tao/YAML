@@ -1,5 +1,6 @@
 #include "ahk_bridge.h"
 #include "ahk_error.h"
+#include "file_io.h"
 
 #include <yaml.h>
 #include <stdlib.h>
@@ -536,90 +537,66 @@ static int emit_one_doc(yaml_emitter_t *em, ref_table_t *rt, VARIANT *value)
     return 0;
 }
 
-MCL_EXPORT(dumps, Ptr, pIn, Int, bPretty, Ptr, ppOut, Ptr, pOutSize, CDecl_Int);
-int dumps(VARIANT *pIn, int bPretty, unsigned char **ppOut, int64_t *pOutSize)
+/* Common emitter setup. The output destination is set separately by the
+ * caller (buffer for dumps/dumps_all, FILE* for dumps_*_path / *_handle).
+ * Returns 1 on success, 0 with err globals populated on failure. */
+static int setup_emitter(yaml_emitter_t *em, int bPretty)
 {
-    clear_err();
-    *ppOut = NULL;
-    *pOutSize = 0;
+    if (!yaml_emitter_initialize(em)) {
+        set_err("Emitter init failed", NULL, 0, 0);
+        return 0;
+    }
+    yaml_emitter_set_unicode(em, 1);
+    yaml_emitter_set_width(em, bPretty ? 80 : -1);
+    yaml_emitter_set_indent(em, 2);
+    return 1;
+}
 
-    outbuf_t ob = { .data = NULL, .size = 0, .capacity = 0, .oom = 0 };
+/* Emit a single VARIANT as a one-document YAML stream into the emitter.
+ * Caller owns emitter init/cleanup and output destination wiring. */
+static int dumps_with_emitter(yaml_emitter_t *em, VARIANT *pIn)
+{
     ref_table_t rt = { NULL, 0, 0, 0, 0 };
 
-    /* Pass 1: count references so we know which objects need anchors. */
     if (count_value(&rt, pIn) != 0) {
         set_err("Reference table overflow", NULL, 0, 0);
         reftab_free(&rt);
         return -1;
     }
 
-    yaml_emitter_t em;
-    if (!yaml_emitter_initialize(&em)) {
-        set_err("Emitter init failed", NULL, 0, 0);
-        return -1;
-    }
-    yaml_emitter_set_output(&em, outbuf_write_handler, &ob);
-    yaml_emitter_set_unicode(&em, 1);
-    yaml_emitter_set_width(&em, bPretty ? 80 : -1);
-    yaml_emitter_set_indent(&em, 2);
-
     int rc = 0;
     yaml_event_t ev;
 
     if (!yaml_stream_start_event_initialize(&ev, YAML_UTF8_ENCODING) ||
-        !yaml_emitter_emit(&em, &ev)) { rc = -1; goto done; }
+        !yaml_emitter_emit(em, &ev)) { rc = -1; goto done; }
 
-    if (emit_one_doc(&em, &rt, pIn) != 0) { rc = -1; goto done; }
+    if (emit_one_doc(em, &rt, pIn) != 0) { rc = -1; goto done; }
 
     if (!yaml_stream_end_event_initialize(&ev) ||
-        !yaml_emitter_emit(&em, &ev)) { rc = -1; goto done; }
+        !yaml_emitter_emit(em, &ev)) { rc = -1; goto done; }
 
 done:
     if (rc != 0 && g_err_message[0] == 0) {
-        set_err(em.problem ? em.problem : "Unknown emitter error", NULL, 0, 0);
+        set_err(em->problem ? em->problem : "Unknown emitter error", NULL, 0, 0);
     }
-    yaml_emitter_delete(&em);
     reftab_free(&rt);
-
-    if (rc == 0) {
-        *ppOut = ob.data;
-        *pOutSize = (int64_t)ob.size;
-    } else {
-        if (ob.data) free(ob.data);
-    }
     return rc;
 }
 
-MCL_EXPORT(dumps_all, Ptr, pIn, Int, bPretty, Ptr, ppOut, Ptr, pOutSize, CDecl_Int);
-int dumps_all(VARIANT *pIn, int bPretty, unsigned char **ppOut, int64_t *pOutSize)
+/* Emit a multi-document YAML stream from an Array VARIANT into the emitter. */
+static int dumps_all_with_emitter(yaml_emitter_t *em, VARIANT *pIn)
 {
-    clear_err();
-    *ppOut = NULL;
-    *pOutSize = 0;
-
     if (pIn->vt != VT_DISPATCH || !pIn->pdispVal ||
         !call_has_method(pIn->pdispVal, s_bstrPush.szData)) {
         set_err("DumpAll input must be an Array of documents", NULL, 0, 0);
         return -1;
     }
 
-    outbuf_t ob = { .data = NULL, .size = 0, .capacity = 0, .oom = 0 };
-
-    yaml_emitter_t em;
-    if (!yaml_emitter_initialize(&em)) {
-        set_err("Emitter init failed", NULL, 0, 0);
-        return -1;
-    }
-    yaml_emitter_set_output(&em, outbuf_write_handler, &ob);
-    yaml_emitter_set_unicode(&em, 1);
-    yaml_emitter_set_width(&em, bPretty ? 80 : -1);
-    yaml_emitter_set_indent(&em, 2);
-
     int rc = 0;
     yaml_event_t ev;
 
     if (!yaml_stream_start_event_initialize(&ev, YAML_UTF8_ENCODING) ||
-        !yaml_emitter_emit(&em, &ev)) { rc = -1; goto done; }
+        !yaml_emitter_emit(em, &ev)) { rc = -1; goto done; }
 
     /* Walk the input Array via __Enum(2). Each iteration yields (index, value);
      * the value is the per-document tree. Anchors are document-local, so each
@@ -643,7 +620,7 @@ int dumps_all(VARIANT *pIn, int bPretty, unsigned char **ppOut, int64_t *pOutSiz
                 rc = -1;
                 break;
             }
-            int doc_rc = emit_one_doc(&em, &rt, &doc);
+            int doc_rc = emit_one_doc(em, &rt, &doc);
             reftab_free(&rt);
             variant_release(&idx);
             variant_release(&doc);
@@ -654,12 +631,29 @@ int dumps_all(VARIANT *pIn, int bPretty, unsigned char **ppOut, int64_t *pOutSiz
     }
 
     if (!yaml_stream_end_event_initialize(&ev) ||
-        !yaml_emitter_emit(&em, &ev)) { rc = -1; goto done; }
+        !yaml_emitter_emit(em, &ev)) { rc = -1; goto done; }
 
 done:
     if (rc != 0 && g_err_message[0] == 0) {
-        set_err(em.problem ? em.problem : "Unknown emitter error", NULL, 0, 0);
+        set_err(em->problem ? em->problem : "Unknown emitter error", NULL, 0, 0);
     }
+    return rc;
+}
+
+MCL_EXPORT(dumps, Ptr, pIn, Int, bPretty, Ptr, ppOut, Ptr, pOutSize, CDecl_Int);
+int dumps(VARIANT *pIn, int bPretty, unsigned char **ppOut, int64_t *pOutSize)
+{
+    clear_err();
+    *ppOut = NULL;
+    *pOutSize = 0;
+
+    outbuf_t ob = { .data = NULL, .size = 0, .capacity = 0, .oom = 0 };
+
+    yaml_emitter_t em;
+    if (!setup_emitter(&em, bPretty)) return -1;
+    yaml_emitter_set_output(&em, outbuf_write_handler, &ob);
+
+    int rc = dumps_with_emitter(&em, pIn);
     yaml_emitter_delete(&em);
 
     if (rc == 0) {
@@ -668,6 +662,91 @@ done:
     } else {
         if (ob.data) free(ob.data);
     }
+    return rc;
+}
+
+MCL_EXPORT(dumps_all, Ptr, pIn, Int, bPretty, Ptr, ppOut, Ptr, pOutSize, CDecl_Int);
+int dumps_all(VARIANT *pIn, int bPretty, unsigned char **ppOut, int64_t *pOutSize)
+{
+    clear_err();
+    *ppOut = NULL;
+    *pOutSize = 0;
+
+    outbuf_t ob = { .data = NULL, .size = 0, .capacity = 0, .oom = 0 };
+
+    yaml_emitter_t em;
+    if (!setup_emitter(&em, bPretty)) return -1;
+    yaml_emitter_set_output(&em, outbuf_write_handler, &ob);
+
+    int rc = dumps_all_with_emitter(&em, pIn);
+    yaml_emitter_delete(&em);
+
+    if (rc == 0) {
+        *ppOut = ob.data;
+        *pOutSize = (int64_t)ob.size;
+    } else {
+        if (ob.data) free(ob.data);
+    }
+    return rc;
+}
+
+/* Wires emitter output to fp, runs body() against (em, pIn), then tears
+ * down. Caller owns the FILE*. */
+static int dumps_to_file(VARIANT *pIn, int bPretty, FILE *fp,
+                         int (*body)(yaml_emitter_t*, VARIANT*))
+{
+    yaml_emitter_t em;
+    if (!setup_emitter(&em, bPretty)) return -1;
+    yaml_emitter_set_output_file(&em, fp);
+
+    int rc = body(&em, pIn);
+    yaml_emitter_delete(&em);
+    return rc;
+}
+
+#define fcleanup(fp) { fflush(fp); fclose(fp); }
+
+MCL_EXPORT(dumps_path, Ptr, pIn, Int, bPretty, Ptr, path, CDecl_Int);
+int dumps_path(VARIANT *pIn, int bPretty, const wchar_t *path)
+{
+    clear_err();
+    FILE *fp = file_from_path(path, L"wb");
+    if (!fp) return -1;
+    int rc = dumps_to_file(pIn, bPretty, fp, dumps_with_emitter);
+    fcleanup(fp);
+    return rc;
+}
+
+MCL_EXPORT(dumps_handle, Ptr, pIn, Int, bPretty, Ptr, hWin32, CDecl_Int);
+int dumps_handle(VARIANT *pIn, int bPretty, intptr_t hWin32)
+{
+    clear_err();
+    FILE *fp = file_from_handle(hWin32, _O_WRONLY | _O_BINARY, "wb");
+    if (!fp) return -1;
+    int rc = dumps_to_file(pIn, bPretty, fp, dumps_with_emitter);
+    fcleanup(fp);
+    return rc;
+}
+
+MCL_EXPORT(dumps_all_path, Ptr, pIn, Int, bPretty, Ptr, path, CDecl_Int);
+int dumps_all_path(VARIANT *pIn, int bPretty, const wchar_t *path)
+{
+    clear_err();
+    FILE *fp = file_from_path(path, L"wb");
+    if (!fp) return -1;
+    int rc = dumps_to_file(pIn, bPretty, fp, dumps_all_with_emitter);
+    fcleanup(fp);
+    return rc;
+}
+
+MCL_EXPORT(dumps_all_handle, Ptr, pIn, Int, bPretty, Ptr, hWin32, CDecl_Int);
+int dumps_all_handle(VARIANT *pIn, int bPretty, intptr_t hWin32)
+{
+    clear_err();
+    FILE *fp = file_from_handle(hWin32, _O_WRONLY | _O_BINARY, "wb");
+    if (!fp) return -1;
+    int rc = dumps_to_file(pIn, bPretty, fp, dumps_all_with_emitter);
+    fcleanup(fp);
     return rc;
 }
 

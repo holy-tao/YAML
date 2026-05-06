@@ -1,5 +1,6 @@
 #include "ahk_bridge.h"
 #include "ahk_error.h"
+#include "file_io.h"
 
 #include <yaml.h>
 #include <stdlib.h>
@@ -35,6 +36,8 @@ static inline int buf_eq_any(const char *s, size_t n, const char **arr, size_t a
     return 0;
 }
 
+#define sizeof_arr(arr) (sizeof(arr)/sizeof(*arr))
+
 static int try_parse_bool(const char *s, size_t n, int *out)
 {
     static const char *trues_11[] = {"true","True","TRUE","yes","Yes","YES","on","On","ON","y","Y"};
@@ -44,12 +47,12 @@ static int try_parse_bool(const char *s, size_t n, int *out)
 
     if(bStrictBools) {
         // Compare against YAML 1.2 spec
-        if (buf_eq_any(s, n, trues_12, sizeof(trues_12)/sizeof(*trues_12))) { *out = 1; return 1; }
-        if (buf_eq_any(s, n, falses_12, sizeof(falses_12)/sizeof(*falses_12))) { *out = 0; return 1; }
+        if (buf_eq_any(s, n, trues_12, sizeof_arr(trues_12))) { *out = 1; return 1; }
+        if (buf_eq_any(s, n, falses_12, sizeof_arr(falses_12))) { *out = 0; return 1; }
     } else {
         // Compare against YAML 1.1 spec
-        if (buf_eq_any(s, n, trues_11, sizeof(trues_11)/sizeof(*trues_11))) { *out = 1; return 1; }
-        if (buf_eq_any(s, n, falses_11, sizeof(falses_11)/sizeof(*falses_11))) { *out = 0; return 1; }
+        if (buf_eq_any(s, n, trues_11, sizeof_arr(trues_11))) { *out = 1; return 1; }
+        if (buf_eq_any(s, n, falses_11, sizeof_arr(falses_11))) { *out = 0; return 1; }
     }
     
     return 0;
@@ -754,7 +757,7 @@ static int parse_one_doc(yaml_parser_t *parser,
     return rc;
 }
 
-/* Initialize a yaml_parser_t with a string and a length. Returns NULL on failure. */
+/* Initialize a yaml_parser_t with a string and a length. Returns 1 on success. */
 int parser_init(const char* utf8, size_t len, yaml_parser_t* parser) {
     if (!yaml_parser_initialize(parser)) {
         set_err("Parser init failed", NULL, 0, 0);
@@ -764,29 +767,33 @@ int parser_init(const char* utf8, size_t len, yaml_parser_t* parser) {
     return 1;
 }
 
-MCL_EXPORT(loads, Ptr, utf8, Int64, len, Ptr, pOut, CDecl_Int);
-int loads(const char *utf8, int64_t len, VARIANT *pOut)
+/* Initialize a yaml_parser_t to read from an open FILE*. Returns 1 on success. */
+static int parser_init_file(FILE* fp, yaml_parser_t* parser) {
+    if (!yaml_parser_initialize(parser)) {
+        set_err("Parser init failed", NULL, 0, 0);
+        return 0;
+    }
+    yaml_parser_set_input_file(parser, fp);
+    return 1;
+}
+
+/* Parse one document from an already-initialized parser, with multi-doc
+ * detection. Caller is responsible for parser cleanup. */
+static int loads_with_parser(yaml_parser_t *parser, VARIANT *pOut)
 {
-    clear_err();
-    pOut->vt = VT_EMPTY;
-
-    yaml_parser_t parser;
-    if (parser_init(utf8, len, &parser) == 0) { return -1; }
-
     VARIANT doc_root;
     int have_doc_root = 0;
     int saw_doc_end = 0;
     int saw_stream_end = 0;
-    int rc = parse_one_doc(&parser, &doc_root, &have_doc_root,
+    int rc = parse_one_doc(parser, &doc_root, &have_doc_root,
                            &saw_doc_end, &saw_stream_end);
 
     /* If the first call ended on DOCUMENT_END (not STREAM_END), there may
-     * be a second document. Drain one more to detect multi-doc streams. 
-     */
+     * be a second document. Drain one more to detect multi-doc streams. */
     if (rc == 0 && saw_doc_end && !saw_stream_end) {
         VARIANT doc2;
         int have2 = 0, saw_doc_end2 = 0, saw_stream_end2 = 0;
-        int rc2 = parse_one_doc(&parser, &doc2, &have2,
+        int rc2 = parse_one_doc(parser, &doc2, &have2,
                                 &saw_doc_end2, &saw_stream_end2);
         if (rc2 != 0) {
             if (have_doc_root) variant_release(&doc_root);
@@ -802,8 +809,6 @@ int loads(const char *utf8, int64_t len, VARIANT *pOut)
         /* else: parser hit STREAM_END without another doc - single doc. */
     }
 
-    yaml_parser_delete(&parser);
-
     if (rc == 0) {
         if (have_doc_root) {
             *pOut = doc_root;
@@ -816,19 +821,12 @@ int loads(const char *utf8, int64_t len, VARIANT *pOut)
     return rc;
 }
 
-MCL_EXPORT(loads_all, Ptr, utf8, Int64, len, Ptr, pOut, CDecl_Int);
-int loads_all(const char *utf8, int64_t len, VARIANT *pOut)
+/* Drain all documents from an already-initialized parser into a new Array. */
+static int loads_all_with_parser(yaml_parser_t *parser, VARIANT *pOut)
 {
-    clear_err();
-    pOut->vt = VT_EMPTY;
-
-    yaml_parser_t parser;
-    if (parser_init(utf8, len, &parser) == 0) { return -1; }
-
     IDispatch *result = ahk_new_array();
     if (!result) {
         set_err("Failed to construct Array", NULL, 0, 0);
-        yaml_parser_delete(&parser);
         return -1;
     }
 
@@ -838,7 +836,7 @@ int loads_all(const char *utf8, int64_t len, VARIANT *pOut)
         int have_doc_root = 0;
         int saw_doc_end = 0;
         int saw_stream_end = 0;
-        rc = parse_one_doc(&parser, &doc_root, &have_doc_root,
+        rc = parse_one_doc(parser, &doc_root, &have_doc_root,
                            &saw_doc_end, &saw_stream_end);
         if (rc != 0) break;
 
@@ -867,13 +865,123 @@ int loads_all(const char *utf8, int64_t len, VARIANT *pOut)
         if (saw_stream_end) break;
     }
 
-    yaml_parser_delete(&parser);
-
     if (rc == 0) {
         variant_set_dispatch(pOut, result);
     } else {
         result->lpVtbl->Release(result);
     }
+    return rc;
+}
+
+MCL_EXPORT(loads, Ptr, utf8, Int64, len, Ptr, pOut, CDecl_Int);
+int loads(const char *utf8, int64_t len, VARIANT *pOut)
+{
+    clear_err();
+    pOut->vt = VT_EMPTY;
+
+    yaml_parser_t parser;
+    if (parser_init(utf8, len, &parser) == 0) { return -1; }
+
+    int rc = loads_with_parser(&parser, pOut);
+    yaml_parser_delete(&parser);
+    return rc;
+}
+
+MCL_EXPORT(loads_all, Ptr, utf8, Int64, len, Ptr, pOut, CDecl_Int);
+int loads_all(const char *utf8, int64_t len, VARIANT *pOut)
+{
+    clear_err();
+    pOut->vt = VT_EMPTY;
+
+    yaml_parser_t parser;
+    if (parser_init(utf8, len, &parser) == 0) { return -1; }
+
+    int rc = loads_all_with_parser(&parser, pOut);
+    yaml_parser_delete(&parser);
+    return rc;
+}
+
+MCL_EXPORT(loads_path, Ptr, path, Ptr, pOut, CDecl_Int);
+int loads_path(const wchar_t *path, VARIANT *pOut)
+{
+    clear_err();
+    pOut->vt = VT_EMPTY;
+
+    FILE *fp = file_from_path(path, L"rb");
+    if (!fp) return -1;
+
+    yaml_parser_t parser;
+    int rc;
+    if (!parser_init_file(fp, &parser)) {
+        rc = -1;
+    } else {
+        rc = loads_with_parser(&parser, pOut);
+        yaml_parser_delete(&parser);
+    }
+    fclose(fp);
+    return rc;
+}
+
+MCL_EXPORT(loads_handle, Ptr, hWin32, Ptr, pOut, CDecl_Int);
+int loads_handle(intptr_t hWin32, VARIANT *pOut)
+{
+    clear_err();
+    pOut->vt = VT_EMPTY;
+
+    FILE *fp = file_from_handle(hWin32, _O_RDONLY | _O_BINARY, "rb");
+    if (!fp) return -1;
+
+    yaml_parser_t parser;
+    int rc;
+    if (!parser_init_file(fp, &parser)) {
+        rc = -1;
+    } else {
+        rc = loads_with_parser(&parser, pOut);
+        yaml_parser_delete(&parser);
+    }
+    fclose(fp);
+    return rc;
+}
+
+MCL_EXPORT(loads_all_path, Ptr, path, Ptr, pOut, CDecl_Int);
+int loads_all_path(const wchar_t *path, VARIANT *pOut)
+{
+    clear_err();
+    pOut->vt = VT_EMPTY;
+
+    FILE *fp = file_from_path(path, L"rb");
+    if (!fp) return -1;
+
+    yaml_parser_t parser;
+    int rc;
+    if (!parser_init_file(fp, &parser)) {
+        rc = -1;
+    } else {
+        rc = loads_all_with_parser(&parser, pOut);
+        yaml_parser_delete(&parser);
+    }
+    fclose(fp);
+    return rc;
+}
+
+MCL_EXPORT(loads_all_handle, Ptr, hWin32, Ptr, pOut, CDecl_Int);
+int loads_all_handle(intptr_t hWin32, VARIANT *pOut)
+{
+    clear_err();
+    pOut->vt = VT_EMPTY;
+
+    FILE *fp = file_from_handle(hWin32, _O_RDONLY | _O_BINARY, "rb");
+    if (!fp) return -1;
+
+    yaml_parser_t parser;
+    int rc;
+    if (!parser_init_file(fp, &parser)) {
+        rc = -1;
+    } else {
+        rc = loads_all_with_parser(&parser, pOut);
+        yaml_parser_delete(&parser);
+    }
+    fclose(fp);
     return rc;
 }
 

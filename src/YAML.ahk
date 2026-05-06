@@ -162,25 +162,130 @@ class YAML {
 
     /**
      * Parse the contents of a file into an AHK value. See {@link YAML.Parse `YAML.Parse`}
-     * 
-     * @param {String} path Path to the file to parse 
-     * @param {String} options Any `FileRead` options
+     *
+     * The file is read directly by libyaml via `FILE*`, avoiding the AHK-string
+     * round-trip used by `Parse(FileRead(path))`. libyaml auto-detects UTF-8
+     * vs UTF-16 from the BOM.
+     *
+     * @param {String | Integer | File} file Path to the file, a Win32 file
+     *        HANDLE, or an AHK File object (its `.Handle` is duplicated; the
+     *        caller's File remains valid after this call returns).
      * @returns {Map | Array | Primitive} the parsed value
      */
-    static ParseFile(path, options?) => this.Parse(FileRead(path, options?))
+    static ParseFile(file) {
+        out := Buffer(24, 0)
+        r := this._ReadFileCall("loads_path", "loads_handle", file, out)
+        if r {
+            if r == -2
+                throw YAMLMultiDocError("YAML stream contains multiple documents; use YAML.ParseAllFile")
+            this._ThrowYamlParseError()
+        }
+        result := ComValue(0x400C, out.Ptr)[]
+        if IsObject(result)
+            ObjRelease(ObjPtr(result))
+        return result
+    }
 
     /**
-     * Serialize an AHK value into a YAML string and write it to `path`, overwriting it if it exists.
-     * See {@link YAML.Dump `YAML.Dump`}
-     * 
-     * @param {Map | Array | Primitive} val The value to serialize
-     * @param {String} path Path to the file to write the serialized value to
-     * @param {Integer} pretty If true, pretty-print the YAML string
-     * @param {String} encoding File encoding to use (e.g. "UTF-8", "CP0")
-     * @returns {Integer} 
+     * Parse a multi-document YAML file. See {@link YAML.ParseAll `YAML.ParseAll`}
+     * and {@link YAML.ParseFile `YAML.ParseFile`}.
+     *
+     * @param {String | Integer | File} file Path, Win32 HANDLE, or File object.
+     * @returns {Array<Map | Array | Primitive>}
      */
-    static DumpFile(val, path, pretty := 0, encoding?)
-        => FileOpen(path, "w", encoding?).Write(this.Dump(val, pretty))
+    static ParseAllFile(file) {
+        out := Buffer(24, 0)
+        if this._ReadFileCall("loads_all_path", "loads_all_handle", file, out)
+            this._ThrowYamlParseError()
+        result := ComValue(0x400C, out.Ptr)[]
+        if IsObject(result)
+            ObjRelease(ObjPtr(result))
+        return result
+    }
+
+    /**
+     * Serialize an AHK value into YAML and write it to a file. libyaml writes
+     * directly to the underlying `FILE*`, bypassing the AHK-string round-trip.
+     * Output is always UTF-8.
+     *
+     * @param {Map | Array | Primitive} val The value to serialize
+     * @param {String | Integer | File} file Path (overwritten if it exists),
+     *        a Win32 file HANDLE, or an AHK File object opened for writing.
+     * @param {Integer} pretty If true, pretty-print the YAML string
+     */
+    static DumpFile(val, file, pretty := 0) {
+        varbuf := Buffer(24, 0)
+        vref := ComValue(0x400C, varbuf.Ptr)
+        vref[] := val
+
+        r := this._WriteFileCall("dumps_path", "dumps_handle", file, varbuf, !!pretty)
+        vref[] := 0
+
+        if r {
+            msg := StrGet(this.lib.get_err_message(), "UTF-8")
+            extra := StrGet(this.lib.get_err_extra(), "UTF-8")
+            throw YAMLError("YAML dump failed: " msg, A_ThisFunc, extra)
+        }
+    }
+
+    /**
+     * Serialize an Array of AHK values into a multi-document YAML stream and
+     * write it to a file. See {@link YAML.DumpAll `YAML.DumpAll`} and
+     * {@link YAML.DumpFile `YAML.DumpFile`}.
+     */
+    static DumpAllFile(docs, file, pretty := 0) {
+        if !(docs is Array)
+            throw TypeError("Expected an Array but got a(n) " Type(docs), , docs)
+
+        varbuf := Buffer(24, 0)
+        vref := ComValue(0x400C, varbuf.Ptr)
+        vref[] := docs
+
+        r := this._WriteFileCall("dumps_all_path", "dumps_all_handle", file, varbuf, !!pretty)
+        vref[] := 0
+
+        if r {
+            msg := StrGet(this.lib.get_err_message(), "UTF-8")
+            extra := StrGet(this.lib.get_err_extra(), "UTF-8")
+            throw YAMLError("YAML dump failed: " msg, A_ThisFunc, extra)
+        }
+    }
+
+    /**
+     * Internal: dispatch a read-side file call. C signature is
+     * `fn(path_or_handle, out)`.
+     */
+    static _ReadFileCall(pathFn, handleFn, file, out) {
+        switch true {
+            case file is String:
+                return this.lib.%pathFn%(StrPtr(file), out)
+            case file is Integer:
+                return this.lib.%handleFn%(file, out)
+            case IsObject(file) && file.HasProp("Handle"):
+                return this.lib.%handleFn%(file.Handle, out)
+            default:
+                msg := "Expected a path, file handle, or File object, but got a(n) " type(file)
+                throw TypeError(msg)
+        }
+    }
+
+    /**
+     * Internal: dispatch a write-side file call. C signature is
+     * `fn(varbuf, pretty, path_or_handle)`.
+     */
+    static _WriteFileCall(pathFn, handleFn, file, varbuf, pretty) {
+        switch true {
+            case file is String:
+                return this.lib.%pathFn%(varbuf, pretty, StrPtr(file))
+            case file is Integer:
+                return this.lib.%handleFn%(varbuf, pretty, file)
+            case IsObject(file) && file.HasProp("Handle"):
+                return this.lib.%handleFn%(varbuf, pretty, file.Handle)
+            default:
+                msg := "Expected a path, file handle, or File object but got a(n) " type(file)
+                throw TypeError(msg, , file)
+        }
+    }
 
     /**
      * Parse a YAML string into an AHK value. Single-document only; multi-document streams throw 
