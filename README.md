@@ -2,13 +2,6 @@
 
 A YAML 1.1 loader and emitter for AutoHotkey v2, powered by [libyaml](https://pyyaml.org/wiki/LibYAML) embedded via [MCL](https://github.com/G33kDude/MCL.ahk). Inspired by (read: shamelessly looking over the shoulder of) [`cJSON`](https://github.com/G33kDude/cJson.ahk).
 
-> [!NOTE] 
-> ***This is a Work in Progress***
-> 
-> Core load/dump and multi-document support work;  non-string map key and full [yaml-test-suite] conformance are still in progress. You may encounter edge cases that do not parse which should.
-
-[yaml-test-suite]: https://github.com/yaml/yaml-test-suite
-
 <details>
 <summary><b>Table of Contents</b></summary>
 
@@ -17,6 +10,7 @@ A YAML 1.1 loader and emitter for AutoHotkey v2, powered by [libyaml](https://py
 - [API](#api)
   - [Type Mappings](#type-mappings)
   - [Options](#options)
+  - [Limitations](#limitations)
 - [License](#license)
 
 </details>
@@ -161,6 +155,18 @@ All flags are static properties on `YAML`:
 
 [merge key]: https://yaml.org/type/merge.html
 [ahk object tag]: #serializing-autohotkey-objects
+
+### Limitations
+
+`YAML.ahk` inherits some deficiencies from LibYAML. It will fail to parse some known edge cases:
+- Multiline strings that are not values in a mapping or sequence will usually fail to parse
+- Tabs are never allowed anywhere
+- Flow mappings (JSON-like objects, e.g. `{ key: "value" }`) will fail to parse if they contain newlines
+- Anchor names can only contain ASCII alphanumeric characters
+- LibYAML requires an explicit document start marker (`---`) after a document end (`...`), or it will error.
+- LibYAML will error in places where it should proceed with a warning - notably when it encounters a `%YAML 1.2` or greater directive.
+
+Some of these can be mitigated ahead of time, for example by stripping `%YAML` directives entirely. Most of them will require patching LibYAML or moving to a different library though.
 
 ## License
 
