@@ -8,3 +8,7 @@ tests/conformance/report_*.txt
 dist/
 build/mcl-*
 **.log
+
+# Benchmark corpus (fetched on demand) and per-run results
+tests/bench/corpus/
+tests/bench/results/
