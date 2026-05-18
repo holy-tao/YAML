@@ -1,6 +1,11 @@
 # YAML for AutoHotkey
 
-A YAML 1.1 loader and emitter for AutoHotkey v2, powered by [libyaml](https://pyyaml.org/wiki/LibYAML) embedded via [MCL](https://github.com/G33kDude/MCL.ahk). Inspired by (read: shamelessly looking over the shoulder of) [`cJSON`](https://github.com/G33kDude/cJson.ahk).
+A YAML 1.1 loader and emitter for AutoHotkey v2, powered by [`libyaml`] embedded via [`MCL`]. Inspired by (read: shamelessly looking over the shoulder of) [`cJSON`]. 2-13x faster than [`HotKeyIt/YAML`], with wider gaps on dump and parsing of small inputs - see [Performance](#performance).
+
+[`libyaml`]: https://pyyaml.org/wiki/LibYAML
+[`MCL`]: https://github.com/G33kDude/MCL.ahk
+[`cJSON`]: https://github.com/G33kDude/cJson.ahk
+[`HotKeyIt/YAML`]: https://github.com/HotKeyIt/Yaml
 
 <details>
 <summary><b>Table of Contents</b></summary>
@@ -14,6 +19,7 @@ A YAML 1.1 loader and emitter for AutoHotkey v2, powered by [libyaml](https://py
 - [Type Mappings](#type-mappings)
   - [Explicit Tags](#explicit-tags)
   - [Serializing Autohotkey Objects](#serializing-autohotkey-objects)
+- [Performance](#performance)
 - [Limitations](#limitations)
 - [License](#license)
 
@@ -175,6 +181,29 @@ width: 20
 [`Map`]: https://www.autohotkey.com/docs/v2/lib/Map.htm
 [`Array`]: https://www.autohotkey.com/docs/v2/lib/Array.htm
 [`Primitive`]: https://www.autohotkey.com/docs/v2/Objects.htm#primitive
+
+## Performance
+
+YAML.ahk is consistently 2-13x faster than the only other AHK YAML library [`HotKeyIt/Yaml`], with the largest gaps on dump-heavy workloads where C-side buffer building beats AHK string concatenation.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/perf/comparison-dark.png">
+  <img alt="Parse/Dump vs HotKeyIt/Yaml" src="docs/perf/comparison.png">
+</picture>
+
+Absolute throughput on the same corpus, for context:
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/perf/throughput-dark.png">
+  <img alt="Throughput by case" src="docs/perf/throughput.png">
+</picture>
+
+Methodology: x64 AutoHotkey v2, mean of auto-scaled iteration counts targeting ~1s wall time per op.
+The corpus is:
+- kubernetes/kubernetes v1.30 [swagger.json](https://github.com/kubernetes/kubernetes/blob/release-1.30/api/openapi-spec/swagger.json)
+- rapidyaml v0.7.1 [bm/cases](https://github.com/biojppm/rapidyaml/tree/master/bm/cases)
+  
+Reproduce with `run-bench.ps1` (and `-Compare` for the head-to-head).
 
 ## Limitations
 

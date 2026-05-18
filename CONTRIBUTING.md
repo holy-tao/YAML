@@ -38,9 +38,9 @@ by running [`run-tests.ps1`](./run-tests.ps1).
 > the time, the rest of the time gcc dies silently.
 
 
-### yaml-test-suite conformance
+### [yaml-test-suite] conformance
 
-A separate harness runs the upstream [yaml-test-suite](https://github.com/yaml/yaml-test-suite) 
+A separate harness runs the upstream [yaml-test-suite] 
 (pinned to `data-2022-01-17`) against `dist/YAML.ahk` and writes a pass/fail summary
 to `tests/conformance/report-<timestamp>.txt`. It is **not** part of `RunTests.ahk`. To run these,
 run [`RunConformance.ahk`](./tests/RunConformance.ahk). Requires on `cJSON.ahk` being reachable 
@@ -51,6 +51,12 @@ is expected to fail test that LibYAML fails. Check out the [YAML Test Matrix](ht
 for details. This repo should probably switch to [`libfyaml`](https://github.com/pantoniou/libfyaml) or
 [`RapidYaml`](https://rapidyaml.readthedocs.io/v0.7.1/index.html) (though the latter would require
 porting C code to C++) to get proper spec compliance and YAML 1.2 support.
+
+[yaml-test-suite]: https://github.com/yaml/yaml-test-suite
+
+### Performance testing
+
+Run [`run-bench.ps1`](./run-bench.ps1) to run the existing performance test suite. You should do this before and after making your changes. You can also run `run-tests.ps1 -Compare` to run a subset of the performance tests in comparison to [`HotKeyIt/YAML`](https://github.com/HotKeyIt/Yaml), though this isn't super useful except for showboating.
 
 ## Troubleshooting
 
