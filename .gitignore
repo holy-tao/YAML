@@ -12,3 +12,4 @@ build/mcl-*
 # Benchmark corpus (fetched on demand) and per-run results
 tests/bench/corpus/
 tests/bench/results/
+tests/bench/vendor/
